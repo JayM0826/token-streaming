@@ -351,7 +351,7 @@ function isReadableSourceFile(file: string): boolean {
     return false;
   }
 
-  return /\.(ts|tsx|js|jsx|mjs|cjs|json|md|yaml|yml|txt)$/.test(normalized);
+  return /\.(ts|tsx|js|jsx|mjs|cjs|py|json|md|yaml|yml|txt)$/.test(normalized);
 }
 
 function normalizeRepoPath(file: string): string {

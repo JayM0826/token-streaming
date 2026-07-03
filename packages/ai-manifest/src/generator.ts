@@ -414,6 +414,12 @@ function inferModuleRoot(file: string): string | undefined {
       return parts.slice(0, rootParts.length + 1).join("/");
     }
   }
+  if (parts[0] === "app" && parts.length > 2) {
+    return parts.slice(0, 2).join("/");
+  }
+  if (parts[0] === "src" && parts.length > 2 && isPythonSourceFile(file)) {
+    return parts.slice(0, 2).join("/");
+  }
   if (parts[0] === "src" && parts.length > 2 && /api|service|repository|controller|route|schema|provider/i.test(parts.at(-1) ?? "")) {
     return parts.slice(0, 2).join("/");
   }
@@ -449,11 +455,18 @@ function nearbyTests(files: string[], name: string): string[] {
 }
 
 function isPublicApiCandidate(file: string): boolean {
-  return /(^|\/)(index|api|route|routes|controller|schema|service)\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(file);
+  return /(^|\/)(index|api|route|routes|controller|schema|service)\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(file)
+    || /(^|\/)(__init__|main|train|eval)\.py$/i.test(file);
 }
 
 function isTestFile(file: string): boolean {
-  return /(^|\/)(__tests__|tests?|specs?)(\/|$)|\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(file);
+  return /(^|\/)(__tests__|tests?|specs?)(\/|$)|\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(file)
+    || /(^|\/)test_[^/]+\.py$/i.test(file)
+    || /(^|\/)[^/]+_test\.py$/i.test(file);
+}
+
+function isPythonSourceFile(file: string): boolean {
+  return /\.py$/i.test(file) && !isTestFile(file);
 }
 
 function confidenceFor(fileCount: number, publicOrTouchCount: number, testCount: number): GeneratedModuleCandidate["confidence"] {

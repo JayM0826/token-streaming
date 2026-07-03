@@ -119,6 +119,36 @@ test("generateFallbackManifest infers module and workflow candidates for foreign
   }
 });
 
+test("generateFallbackManifest infers Python package modules for research repos", async () => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-generated-python-manifest-"));
+  try {
+    const result = await generateFallbackManifest(repoRoot, {
+      ...createSummary(repoRoot),
+      packageManager: undefined,
+      scripts: {},
+      trackedFiles: [
+        "app/main.py",
+        "app/vjepa/train.py",
+        "app/vjepa/transforms.py",
+        "src/models/vision_transformer.py",
+        "src/models/predictor.py",
+        "src/datasets/video_dataset.py",
+        "src/masks/multiblock3d.py",
+        "tests/test_models.py"
+      ],
+      sourceDirectories: ["src", "app"]
+    });
+    const repoMap = JSON.parse(await readFile(path.join(result.root, "repo-map.json"), "utf8"));
+
+    assert.equal(repoMap.inferredModules.some((candidate) => candidate.root === "app/vjepa"), true);
+    assert.equal(repoMap.inferredModules.some((candidate) => candidate.root === "src/models"), true);
+    assert.equal(repoMap.inferredModules.some((candidate) => candidate.root === "src/datasets"), true);
+    assert.match(repoMap.inferredModules.find((candidate) => candidate.root === "app/vjepa").evidence.join("\n"), /public API-like/);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateFallbackManifest skips existing generated files by default", async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-generated-manifest-"));
   try {

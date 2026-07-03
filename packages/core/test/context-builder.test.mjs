@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -79,6 +79,58 @@ test("buildRuntimeContext includes ownership metadata in the overview", async ()
     assert.match(context.overview, /## Recent History/);
     assert.match(context.overview, /ses_previous: failed \(verification\)/);
     assert.match(context.overview, /test\.run:failed:checkout\.test failed/);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("buildRuntimeContext can select Python source snippets by task words", async () => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-context-python-"));
+  try {
+    await mkdir(path.join(repoRoot, "app", "vjepa"), { recursive: true });
+    await writeFile(
+      path.join(repoRoot, "app", "vjepa", "train.py"),
+      "def train_model():\n    return 'training loop'\n",
+      "utf8"
+    );
+
+    const context = await buildRuntimeContext(
+      "summarize training loop",
+      {
+        root: repoRoot,
+        packageManager: undefined,
+        scripts: {},
+        trackedFiles: ["app/vjepa/train.py"],
+        sourceDirectories: ["app"],
+        moduleManifestPaths: [],
+        workflowManifestPaths: [],
+        aiManifestPresent: false
+      },
+      {
+        project: undefined,
+        architecture: undefined,
+        conventions: undefined,
+        ownership: undefined,
+        playbooks: [],
+        modules: [],
+        workflows: [],
+        generated: true
+      },
+      {
+        strategy: "default",
+        mode: "auto",
+        task: "summarize training loop",
+        riskLevel: "low",
+        phases: [],
+        requiredAgents: [],
+        handoffs: [],
+        testCommands: [],
+        notes: []
+      }
+    );
+
+    assert.equal(context.sourceSnippets.some((snippet) => snippet.path === "app/vjepa/train.py"), true);
+    assert.match(context.overview, /training loop/);
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
   }
