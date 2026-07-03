@@ -1,0 +1,27 @@
+sensitive_paths:
+  - packages/tools/src/shell.ts
+  - packages/tools/src/patch-engine.ts
+  - packages/storage/src/checkpoint-store.ts
+  - packages/providers/src/openai-provider.ts
+protected_patterns:
+  - BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY
+  - OPENAI_API_KEY\s*=
+  - ANTHROPIC_API_KEY\s*=
+approval_required_commands:
+  - npm publish
+  - pnpm publish
+  - netlify deploy --prod
+requires_review:
+  - changes to shell command execution
+  - changes to patch application
+  - changes to rollback behavior
+  - changes to provider authentication
+  - applying model-generated patch proposals
+policy_behavior:
+  - Sensitive paths require --allow-sensitive in the CLI host.
+  - Sensitive paths can also be approved through --approval allow or --approval prompt.
+  - Forbidden commands are blocked even when --allow-sensitive is present.
+forbidden_commands:
+  - git reset --hard
+  - git checkout --
+  - Remove-Item -Recurse -Force /

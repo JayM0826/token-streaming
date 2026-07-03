@@ -1,0 +1,16 @@
+default_owner: agent-platform
+owned_paths:
+  - apps/cli/**: cli-host
+  - packages/core/**: runtime-core
+  - packages/protocol/**: runtime-contracts
+  - packages/ai-manifest/**: agent-native-repo
+  - packages/tools/**: tool-runtime
+  - packages/storage/**: local-storage
+  - packages/providers/**: model-providers
+  - .ai/**: agent-native-repo
+  - docs/**: product-architecture
+review_required:
+  - protocol contract changes
+  - permission or approval policy changes
+  - checkpoint or rollback behavior changes
+  - provider routing and telemetry changes

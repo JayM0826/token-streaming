@@ -1,0 +1,110 @@
+install:
+  - npx pnpm@9.15.0 install
+build:
+  - npx pnpm@9.15.0 build
+package:
+  - npx pnpm@9.15.0 package:check
+acceptance:
+  - npx pnpm@9.15.0 acceptance:check -- --json
+  - npx pnpm@9.15.0 acceptance:check -- --quick --json
+test:
+  - npx pnpm@9.15.0 test
+cli:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- --dry-run "summarize this repo"
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- --dry-run --json "summarize this repo"
+version:
+  - node apps/cli/dist/index.js --version
+commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- commands list
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- commands list --json
+config:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- config inspect
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- config inspect --json
+tools:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- tools list
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- tools list --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- tools run repo.scan
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- tools run repo.scan --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- tools run repo.scan --record --json
+plan:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- plan "fix checkout failing test"
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- plan --json "fix checkout failing test"
+context:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- context inspect "fix checkout failing test"
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- context inspect --json "fix checkout failing test"
+playbooks:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- playbooks list
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- playbooks list --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- playbooks show add-provider
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- playbooks show add-provider --json
+workflows:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- workflows list
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- workflows list --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- workflows show agent-run
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- workflows show agent-run --json
+strategies:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- strategies list
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- strategies list --json
+history:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- history summary
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- history summary --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- history prune --dry-run --keep 20
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- history prune --dry-run --keep 20 --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- history prune --keep 20
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- history prune --keep 20 --json
+sessions:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- sessions list
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- sessions list --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- sessions show <session-id>
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- sessions show latest --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- sessions show <session-id> --json
+reports:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- reports list
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- reports list --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- reports show <session-id>
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- reports show latest --json
+checkpoints:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- checkpoints list
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- checkpoints list --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- checkpoints show <checkpoint-id>
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- checkpoints show latest --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- checkpoints show <checkpoint-id> --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- rollback <checkpoint-id> --dry-run
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- rollback <checkpoint-id> --dry-run --json
+diff:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- diff
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- diff --json
+search:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- search authorizePayment
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- search authorizePayment --json
+verify:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- verify
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- verify --json
+model_stats:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- stats models
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- stats models --json
+model_select:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- models select
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- models select --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- --mode economy models select
+model_doctor:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- doctor repo
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- doctor repo --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- doctor models
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- doctor models --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- doctor models --probe
+  - npx pnpm@9.15.0 smoke:openai
+manifest:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest init
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest init --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest generate
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest generate --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest generate --force
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest generate --force --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest inspect
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest inspect --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest validate
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest validate --json
+manifest_force:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest init --force
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest generate --force

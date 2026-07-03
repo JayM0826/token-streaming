@@ -1,0 +1,18 @@
+name: ai-manifest
+description: Loads official and generated agent-native repository metadata.
+owners:
+  - repo-intelligence
+public_api:
+  - packages/ai-manifest/src/index.ts
+depends_on:
+  - protocol
+used_by:
+  - core
+test_commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/ai-manifest test
+rules:
+  - Prefer official `.ai/` files over `.ai/generated/`.
+  - Keep generated metadata clearly marked as fallback.
+  - `manifest init` should scaffold official `.ai/` files and avoid model calls.
+  - Do not overwrite existing official manifest files unless explicitly requested.
+  - Treat `.ai/models.yaml` as the repository-level model selection policy.

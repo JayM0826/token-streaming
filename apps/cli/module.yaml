@@ -1,0 +1,21 @@
+name: cli
+description: Terminal host for Token Streaming's headless runtime.
+owners:
+  - cli-runtime
+public_api:
+  - apps/cli/src/index.ts
+depends_on:
+  - core
+  - providers
+  - protocol
+used_by: []
+test_commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli test
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- --provider stub --dry-run "summarize this repo"
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- config inspect --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- tools list --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- tools run repo.scan --json
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- tools run repo.scan --record --json
+rules:
+  - Keep business logic in core, not CLI.
+  - CLI should parse user intent and display runtime outputs.

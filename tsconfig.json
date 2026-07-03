@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/protocol" },
+    { "path": "packages/ai-manifest" },
+    { "path": "packages/tools" },
+    { "path": "packages/storage" },
+    { "path": "packages/providers" },
+    { "path": "packages/core" },
+    { "path": "apps/cli" }
+  ]
+}

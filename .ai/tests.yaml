@@ -1,0 +1,9 @@
+default:
+  - npx pnpm@9.15.0 build
+  - npx pnpm@9.15.0 test
+behavior:
+  - node --test "packages/**/*.test.mjs"
+cli_behavior:
+  - node --test "apps/**/*.test.mjs"
+cli_smoke:
+  - npx pnpm@9.15.0 --filter @token-streaming/cli start -- --provider stub --dry-run "summarize this repo"

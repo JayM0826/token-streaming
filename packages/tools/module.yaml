@@ -1,0 +1,20 @@
+name: tools
+description: Local tool runtime for repository scanning, text search, shell execution, git diff, tests, filesystem access, and patch application.
+owners:
+  - tool-runtime
+public_api:
+  - packages/tools/src/index.ts
+depends_on:
+  - protocol
+used_by:
+  - core
+test_commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/tools test
+rules:
+  - Keep tool catalog metadata stable and machine-readable for CLI and future desktop hosts.
+  - Expose only read-only tools through direct catalog execution.
+  - Validate paths stay inside the repository root before writing.
+  - Treat shell execution and patch application as high-risk areas.
+  - Prefer structured command results over raw strings.
+  - Parse patch proposals only from explicit JSON or token-streaming-patch fences.
+  - Verification command output should be summarized before returning to the model.

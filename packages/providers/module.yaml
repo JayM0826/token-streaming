@@ -1,0 +1,19 @@
+name: providers
+description: Model provider adapters and provider selection factory.
+owners:
+  - model-runtime
+public_api:
+  - packages/providers/src/index.ts
+depends_on:
+  - protocol
+used_by:
+  - core
+  - cli
+test_commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/providers test
+rules:
+  - Do not hard-code API keys.
+  - Keep provider authentication out of core runtime.
+  - Keep stub provider available for offline development.
+  - Resolve model selection in priority order: CLI override, manifest policy, provider default.
+  - Keep model doctor checks offline unless an explicit probe is requested.

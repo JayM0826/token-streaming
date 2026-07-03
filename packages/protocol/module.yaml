@@ -1,0 +1,20 @@
+name: protocol
+description: Shared TypeScript contracts for sessions, events, manifests, strategies, tools, models, and checkpoints.
+owners:
+  - core-runtime
+public_api:
+  - packages/protocol/src/index.ts
+depends_on: []
+used_by:
+  - core
+  - ai-manifest
+  - tools
+  - storage
+  - providers
+  - cli
+test_commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/protocol test
+rules:
+  - Keep this package dependency-light.
+  - Do not import runtime packages from protocol.
+

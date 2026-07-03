@@ -1,0 +1,16 @@
+name: storage
+description: Persistence for session event logs, checkpoints, rollback data, and run reports.
+owners:
+  - core-runtime
+public_api:
+  - packages/storage/src/index.ts
+depends_on:
+  - protocol
+used_by:
+  - core
+test_commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/storage test
+rules:
+  - Event logs must remain append-only.
+  - Checkpoints must preserve enough file state to rollback without git.
+  - Telemetry aggregation must be read-only over persisted session events.

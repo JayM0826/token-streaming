@@ -1,0 +1,24 @@
+{
+  "name": "token-streaming",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CLI-first agentic coding runtime with agent-native repository metadata.",
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build": "tsc -b tsconfig.json --force",
+    "clean": "tsc -b tsconfig.json --clean",
+    "typecheck": "tsc -b tsconfig.json --force",
+    "test": "tsc -b tsconfig.json --force && node --test \"packages/**/*.test.mjs\" \"apps/**/*.test.mjs\"",
+    "lint": "pnpm -r lint",
+    "package:check": "node scripts/check-package-readiness.mjs",
+    "acceptance:check": "node scripts/check-acceptance.mjs",
+    "smoke:openai": "node scripts/smoke-openai.mjs",
+    "dev": "pnpm --filter @token-streaming/cli dev",
+    "cli": "pnpm --filter @token-streaming/cli start"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

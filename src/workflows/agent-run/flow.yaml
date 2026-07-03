@@ -1,0 +1,25 @@
+name: agent-run
+description: Cross-package runtime path from a CLI task to model planning, safe patching, verification, telemetry, and persisted reports.
+steps:
+  - parse CLI task and host options
+  - load repo scan and AI manifest
+  - select product mode and model provider
+  - build default strategy plan and runtime context
+  - call model provider for planning or patch proposal
+  - evaluate permissions and create checkpoint before writes
+  - execute manifest-declared verification through test.run
+  - persist event log, checkpoint metadata, telemetry, and markdown report
+touches:
+  - apps/cli
+  - packages/core
+  - packages/ai-manifest
+  - packages/providers
+  - packages/tools
+  - packages/storage
+test_commands:
+  - npx pnpm@9.15.0 test
+  - npx pnpm@9.15.0 --filter @token-streaming/cli build
+risks:
+  - Model output must never write files without structured patch parsing, permission checks, and checkpoint creation.
+  - Verification commands must be manifest-declared and pass forbidden-command policy.
+  - Session logs and reports must preserve failure artifacts without storing full prompts as telemetry.

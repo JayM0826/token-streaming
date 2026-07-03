@@ -1,0 +1,14 @@
+{
+  "trackedFiles": [
+    ".token-streaming\\sessions\\ses_mqja3m75_ywd9afp1.jsonl",
+    "package.json",
+    "src\\index.ts",
+    "tsconfig.json",
+    "tsconfig.tsbuildinfo"
+  ],
+  "sourceDirectories": [
+    "src"
+  ],
+  "moduleManifestPaths": [],
+  "workflowManifestPaths": []
+}

@@ -1,0 +1,33 @@
+{
+  "name": "@token-streaming/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "private": false,
+  "bin": {
+    "token-streaming": "dist/index.js",
+    "ai": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "dev": "node dist/index.js",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@token-streaming/ai-manifest": "workspace:*",
+    "@token-streaming/core": "workspace:*",
+    "@token-streaming/providers": "workspace:*",
+    "@token-streaming/protocol": "workspace:*",
+    "@token-streaming/storage": "workspace:*",
+    "@token-streaming/tools": "workspace:*"
+  }
+}

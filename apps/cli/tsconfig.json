@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true
+  },
+  "references": [
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/providers" },
+    { "path": "../../packages/core" },
+    { "path": "../../packages/storage" },
+    { "path": "../../packages/ai-manifest" },
+    { "path": "../../packages/tools" }
+  ],
+  "include": ["src/**/*.ts"]
+}

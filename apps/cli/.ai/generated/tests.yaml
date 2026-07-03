@@ -1,0 +1,4 @@
+inferred_test_commands:
+  - pnpm typecheck
+  - pnpm test
+  - pnpm lint

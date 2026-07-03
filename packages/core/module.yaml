@@ -1,0 +1,29 @@
+name: core
+description: Headless runtime for session creation, manifest-aware planning, default strategy execution, provider calls, checkpoints, tests, and reports.
+owners:
+  - core-runtime
+public_api:
+  - packages/core/src/index.ts
+depends_on:
+  - protocol
+  - ai-manifest
+  - providers
+  - storage
+  - tools
+used_by:
+  - cli
+test_commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/core test
+rules:
+  - Keep UI concerns out of core.
+  - Keep `default` as the only real V1 strategy.
+  - Represent V1 multi-agent collaboration as role phases and handoff artifacts, not permanent swarms.
+  - Add future orchestration modes through the strategy registry, not runtime conditionals.
+  - Keep cost/effectiveness tuning in mode profiles rather than strategy implementations.
+  - Record model-call metadata for planning and repair without storing full prompts as telemetry.
+  - Do not let model providers bypass tool, patch, or checkpoint boundaries.
+  - Code-change prompts must route model output into structured patch proposals.
+  - Runtime prompts must include execution-plan handoffs so role artifacts affect model behavior.
+  - Context building should prefer manifest-declared source boundaries before broad file scanning.
+  - Run planned verification commands in order and stop at the first failure.
+  - Repair attempts must be driven by structured verification feedback and still use patch proposals.

@@ -1,0 +1,7 @@
+default_provider: auto
+economy_model: gpt-5.5-mini
+auto_model: gpt-5.5
+max_model: gpt-5.5
+model_candidates:
+  - gpt-5.5-mini;provider=openai;quality=0.72;cost=0.25;latency=0.25;tags=economy,fast
+  - gpt-5.5;provider=openai;quality=0.94;cost=0.75;latency=0.55;tags=balanced,max
