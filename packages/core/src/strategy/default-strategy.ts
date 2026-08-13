@@ -181,8 +181,15 @@ function selectTestCommands(input: StrategyInput): string[] {
   }
 
   const scripts = input.repo.scripts;
-  const candidates = ["test", "typecheck", "lint"].filter((script) => scripts[script]);
+  const candidates = ["test", "typecheck", "lint"].filter(
+    (script) => scripts[script] && !(script === "test" && isPlaceholderTestScript(scripts[script] ?? ""))
+  );
   return candidates.map((script) => `${input.repo.packageManager ?? "pnpm"} run ${script}`);
+}
+
+function isPlaceholderTestScript(command: string): boolean {
+  const normalized = command.toLowerCase().replace(/\s+/g, " ");
+  return normalized.includes("no test specified") || normalized.includes("no tests specified") || normalized.includes("no test configured");
 }
 
 function createNotes(input: StrategyInput, taskKind: TaskKind, riskLevel: ExecutionPlan["riskLevel"]): string[] {

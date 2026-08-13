@@ -4,6 +4,7 @@ build:
   - npx pnpm@9.15.0 build
 package:
   - npx pnpm@9.15.0 package:check
+  - npx pnpm@9.15.0 package:install-check
 acceptance:
   - npx pnpm@9.15.0 acceptance:check -- --json
   - npx pnpm@9.15.0 acceptance:check -- --quick --json

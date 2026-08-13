@@ -17,6 +17,7 @@ const steps = [
         ["test", pnpmCommand("test")]
       ]),
   ["package", [process.execPath, "scripts/check-package-readiness.mjs"]],
+  ["packed-install", [process.execPath, "scripts/check-packed-install.mjs"]],
   ["manifest", [process.execPath, "apps/cli/dist/index.js", "manifest", "validate", "--json"]],
   ["repository-doctor", repositoryDoctorArgs]
 ];

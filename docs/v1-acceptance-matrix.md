@@ -61,6 +61,7 @@ Run offline quality gates:
 pnpm lint
 pnpm test
 pnpm package:check
+pnpm package:install-check
 ```
 
 Run a real provider acceptance probe:

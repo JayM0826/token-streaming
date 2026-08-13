@@ -1,6 +1,7 @@
 default:
   - npx pnpm@9.15.0 build
   - npx pnpm@9.15.0 test
+  - npx pnpm@9.15.0 package:install-check
 behavior:
   - node --test "packages/**/*.test.mjs"
 cli_behavior:

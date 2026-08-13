@@ -550,14 +550,20 @@ function normalizeRepoPath(file: string): string {
 
 function inferTestScriptNames(scripts: Record<string, string>): string[] {
   return Object.keys(scripts)
-    .filter((name) => /test|check|lint|type/i.test(name));
+    .filter((name) => /test|check|lint|type/i.test(name) && !isPlaceholderTestScript(scripts[name] ?? ""));
 }
 
 function scriptCommand(summary: RepoSummary, script: string): string[] {
-  if (!summary.scripts[script]) {
+  const command = summary.scripts[script];
+  if (!command || (script === "test" && isPlaceholderTestScript(command))) {
     return [];
   }
   return [`${summary.packageManager ?? "pnpm"} run ${script}`];
+}
+
+function isPlaceholderTestScript(command: string): boolean {
+  const normalized = command.toLowerCase().replace(/\s+/g, " ");
+  return normalized.includes("no test specified") || normalized.includes("no tests specified") || normalized.includes("no test configured");
 }
 
 function emptyAwareList(values: string[]): string[] {

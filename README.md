@@ -22,6 +22,7 @@ pnpm clean
 pnpm build
 pnpm test
 pnpm package:check
+pnpm package:install-check
 pnpm acceptance:check
 pnpm cli -- "summarize this repo"
 node apps/cli/dist/index.js --version
@@ -29,6 +30,7 @@ node apps/cli/dist/index.js --version
 
 `pnpm test` compiles all workspace packages and then runs the Node.js behavior tests in `packages/**/*.test.mjs` and `apps/**/*.test.mjs` against the compiled `dist` output.
 `pnpm package:check` verifies release readiness for the CLI and workspace packages: package metadata, dist entrypoints, type declarations, package file allowlists, Node engine constraints, and CLI bin shebangs.
+`pnpm package:install-check` packs all seven workspace packages, installs the tarballs in an isolated offline consumer, verifies the CLI bin shim, and runs the installed CLI entrypoint.
 `pnpm acceptance:check` runs the offline gates and, when `OPENAI_API_KEY` is present, performs its own live provider probe. Without a key, it exits incomplete with a machine-readable `missing-api-key` status.
 
 ## CLI Usage

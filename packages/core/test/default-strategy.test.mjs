@@ -87,6 +87,21 @@ test("DefaultStrategy falls back to scanner verification commands when generated
   assert.deepEqual(plan.testCommands, ["python -m compileall app src"]);
 });
 
+test("DefaultStrategy ignores npm placeholder test scripts", async () => {
+  const plan = await new DefaultStrategy().createPlan(
+    createInput("fix implementation", {
+      repo: {
+        packageManager: "npm",
+        scripts: {
+          test: 'echo "Error: no test specified" && exit 1'
+        }
+      }
+    })
+  );
+
+  assert.deepEqual(plan.testCommands, []);
+});
+
 test("DefaultStrategy prefers targeted module commands over root defaults", async () => {
   const plan = await new DefaultStrategy().createPlan(
     createInput("fix payment refund failure", {

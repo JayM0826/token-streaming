@@ -11,3 +11,11 @@ test("workspace packages pass release readiness checks", () => {
     stdio: ["ignore", "pipe", "pipe"]
   });
 });
+
+test("workspace packages install and run from packed tarballs", () => {
+  execFileSync(process.execPath, ["scripts/check-packed-install.mjs"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+});

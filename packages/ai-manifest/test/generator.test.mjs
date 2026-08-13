@@ -86,6 +86,23 @@ test("generateFallbackManifest writes command and test groups agents can consume
   }
 });
 
+test("generateFallbackManifest ignores npm placeholder test scripts", async () => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-placeholder-test-"));
+  try {
+    const result = await generateFallbackManifest(repoRoot, {
+      ...createSummary(repoRoot),
+      scripts: {
+        test: 'echo "Error: no test specified" && exit 1'
+      }
+    });
+    const testsYaml = await readFile(path.join(result.root, "tests.yaml"), "utf8");
+
+    assert.doesNotMatch(testsYaml, /npm run test/);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("generateFallbackManifest infers module and workflow candidates for foreign repos", async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-generated-manifest-"));
   try {

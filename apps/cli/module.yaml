@@ -11,6 +11,7 @@ depends_on:
 used_by: []
 test_commands:
   - npx pnpm@9.15.0 --filter @token-streaming/cli test
+  - npx pnpm@9.15.0 package:install-check
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- --provider stub --dry-run "summarize this repo"
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- config inspect --json
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- tools list --json

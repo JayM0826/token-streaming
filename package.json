@@ -12,6 +12,7 @@
     "test": "tsc -b tsconfig.json --force && node --test \"packages/**/*.test.mjs\" \"apps/**/*.test.mjs\"",
     "lint": "pnpm -r lint",
     "package:check": "node scripts/check-package-readiness.mjs",
+    "package:install-check": "node scripts/check-packed-install.mjs",
     "acceptance:check": "node scripts/check-acceptance.mjs",
     "smoke:openai": "node scripts/smoke-openai.mjs",
     "dev": "pnpm --filter @token-streaming/cli dev",
