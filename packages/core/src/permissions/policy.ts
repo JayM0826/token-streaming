@@ -116,6 +116,57 @@ export function evaluateToolPolicy(tool: Pick<ToolDefinition, "name" | "risk">):
   };
 }
 
+export function evaluateTestRunPolicy(manifest: RepoManifest, input: Record<string, unknown>): PermissionDecision {
+  const command = typeof input.command === "string" && input.command.trim() ? input.command : undefined;
+  if (!command) {
+    return {
+      target: "tool",
+      action: "test.run",
+      allowed: false,
+      severity: "medium",
+      reasons: ['Tool input requires non-empty string field "command".'],
+      requiresApproval: false
+    };
+  }
+
+  if (!listDeclaredTestCommands(manifest).includes(command)) {
+    return {
+      target: "tool",
+      action: "test.run",
+      allowed: false,
+      severity: "medium",
+      reasons: [`Test command is not declared in .ai/tests.yaml, module.yaml, or flow.yaml: ${command}`],
+      requiresApproval: false
+    };
+  }
+
+  const commandDecision = evaluateCommandPolicy(manifest, command);
+  if (!commandDecision.allowed) {
+    return {
+      ...commandDecision,
+      target: "tool",
+      action: "test.run"
+    };
+  }
+
+  return {
+    target: "tool",
+    action: "test.run",
+    allowed: true,
+    severity: "medium",
+    reasons: [`Manifest-declared test command approved: ${command}`],
+    requiresApproval: false
+  };
+}
+
+export function listDeclaredTestCommands(manifest: RepoManifest): string[] {
+  return [
+    ...stringArray(manifest.tests?.default),
+    ...manifest.modules.flatMap((module) => module.testCommands),
+    ...manifest.workflows.flatMap((workflow) => workflow.testCommands)
+  ].filter((command, index, commands) => command.trim().length > 0 && commands.indexOf(command) === index);
+}
+
 function readSafetyPolicy(manifest: RepoManifest): SafetyPolicy {
   const safety = manifest.safety ?? {};
   return {

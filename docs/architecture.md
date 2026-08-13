@@ -12,6 +12,19 @@ apps/cli
 -> packages/providers
 ```
 
+## Headless Host Contract
+
+`@token-streaming/core` exports `TokenStreamingRuntime` as the shared host boundary. Its public methods are:
+
+- `runTask(input)` for the complete session, model, patch, permission, verification, review, and report lifecycle.
+- `planTask(input)` for a side-effect-free `ExecutionPlan`.
+- `inspectContext(input)` for the bounded `RuntimeContextBundle` selected for a task.
+- `validateManifest()` for the runtime's configured repository.
+- `listTools()` and `runTool(input)` for catalog discovery and policy-gated execution.
+- `rollback(checkpointId, options)` for rollback preview or restore.
+
+The published-package check imports this API from an isolated tarball installation, so the contract is verified independently of monorepo path aliases. The CLI remains a thin first host; a desktop host can use the same methods and protocol event types.
+
 ## Runtime Path
 
 The first version ships only the `default` strategy, selected through a strategy registry. The CLI accepts `--strategy default` and exposes `strategies list` so the strategy dimension is part of the public command surface before additional strategies are implemented.
@@ -30,6 +43,7 @@ User task
 -> strategy registry
 -> mode profile
 -> execution plan
+-> bounded context selection
 -> model response or patch file
 -> patch proposal
 -> permission check
@@ -73,7 +87,7 @@ Model or file-sourced changes must enter the runtime as a structured patch propo
 
 Verification output is reduced to structured feedback before it is reused.
 
-- The runtime runs planned verification commands in order.
+- The runtime runs the plan's canonical `verificationCommands` in order. Deprecated `testCommands` output remains synchronized for V1 JSON compatibility.
 - Runtime verification executes declared commands through the `test.run` tool path, so test runs emit `permission.checked`, `tool.started`, `tool.finished`, and `tests.finished`.
 - The default strategy prefers targeted workflow or module `test_commands`, falls back to `.ai/tests.yaml` `default`, then falls back to detected package scripts.
 - `verify` runs `.ai/tests.yaml` `default` commands directly through the command safety policy without calling a model.
@@ -157,9 +171,9 @@ V1 represents multi-agent collaboration as role phases plus handoff artifacts, n
 - `tester` produces verification results.
 - `reviewer` produces risk and diff review for change or high-risk tasks.
 
-Each execution plan records handoffs such as `researcher -> coder: repository context brief`, making collaboration visible in reports today and reusable by future multi-worker strategies. Every runtime task begins with a structured `run.started` event and records `context.built` after context selection, including selected module, workflow, source-file, test-command, and recent-history counts for future host timelines. Runtime runs also persist a `review.completed` event with risk, verification status, repository-change status, findings, and recommendation so the reviewer phase is visible in event replay and future host UIs.
+Each execution plan records handoffs such as `researcher -> coder: repository context brief`, making collaboration visible in reports today and reusable by future multi-worker strategies. `requiredAgents` is derived only from phases marked `required`; optional low-risk review phases therefore do not trigger an extra model call. Every runtime task begins with a structured `run.started` event and records `context.built` after context selection, including selected module, workflow, source-file, test-command, and recent-history counts for future host timelines. Runtime runs also persist a deterministic `review.completed` summary with risk, verification status, repository-change status, findings, and recommendation even when a separate reviewer model call is unnecessary.
 
-`--parallel-agents` optionally activates non-orchestrator phases as concurrent role agents before the main planning call. These agents produce advisory artifacts only: they do not apply patches, run shell commands, or bypass permission checks. The runtime records `agent.started` and `agent.finished` events, records each sub-agent model call with purpose `agent`, includes the artifacts in the run report, and appends them to the final orchestrator prompt. The default remains disabled to protect everyday cost and latency.
+`--parallel-agents` optionally activates required non-orchestrator phases as concurrent role agents before the main planning call. These agents produce advisory artifacts only: they do not apply patches, run shell commands, or bypass permission checks. The runtime records `agent.started` and `agent.finished` events, records each sub-agent model call with purpose `agent`, includes the artifacts in the run report, and appends them to the final orchestrator prompt. The default remains disabled to protect everyday cost and latency; `max` and high-risk plans can require reviewer participation while low-risk `auto` plans do not.
 
 The CLI exposes this through `plan`, which lets a user inspect phases, required agents, handoffs, verification commands, and selected context before spending model tokens. `strategies list --json` exposes the currently registered strategy catalog for automation and future host UIs.
 
@@ -236,7 +250,8 @@ The context builder adds a small number of source snippets after manifest metada
 - Task words can match tracked source paths.
 - `search --json` provides an explicit tool surface for query-driven source evidence outside the prompt-building path.
 - Paths are normalized to repository-relative `/` separators.
-- Snippets are capped in count and character length to keep prompts bounded.
+- Strategy plans publish explicit module, workflow, public-API, file-count, and character budgets through `ExecutionPlan.context`.
+- Snippets are capped in count and character length, and plan-provided limits are hard-clamped by the context builder so custom strategies cannot create unbounded prompts.
 
 ## Repository Metadata
 
@@ -273,9 +288,9 @@ Runtime context construction follows the agent-native repository order: task, re
 V1 keeps these extension points present but intentionally small:
 
 - strategies: only `default` is built in, but runtime and CLI can resolve registered strategies by id
-- product modes: `economy`, `max`, `auto` resolve to explicit mode profiles for provider reasoning effort
+- product modes: `economy`, `max`, `auto` resolve to explicit reasoning, context-budget, verification-depth, and reviewer-participation behavior
 - model providers: OpenAI Responses API provider plus stub fallback
 - agent roles: represented as phases in the execution plan
 - safety: manifest-aware risk classification and future approval hooks
 
-The strategy registry is the future entry point for alternate orchestration modes such as cheap-fix, max-review, or multi-agent verification. Mode profiles are deliberately separate from strategies so cost/effectiveness tuning can evolve without rewriting the orchestration plan.
+The strategy registry is the future entry point for alternate orchestration modes such as debug, review, or refactor. Mode profiles are deliberately separate from strategies so cost/effectiveness tuning can evolve without multiplying orchestration implementations. The canonical `ExecutionPlan` contract contains `phases`, `requiredAgents`, `handoffs`, `context`, `verificationCommands`, and `risk`; `riskLevel` and `testCommands` remain synchronized deprecated aliases for V1 consumers.

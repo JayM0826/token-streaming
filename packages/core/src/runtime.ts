@@ -1,5 +1,5 @@
 import path from "node:path";
-import { generateFallbackManifest, loadRepoManifest } from "@token-streaming/ai-manifest";
+import { generateFallbackManifest, loadRepoManifest, validateRepoManifest, type ManifestValidationResult } from "@token-streaming/ai-manifest";
 import type {
   AgentRole,
   ApprovalResponse,
@@ -21,13 +21,24 @@ import type {
   VerificationResult
 } from "@token-streaming/protocol";
 import { StubModelProvider } from "@token-streaming/providers";
-import { CheckpointStore, RunReportStore, SessionHistoryStore, type ToolCallSummary } from "@token-streaming/storage";
-import { applyFilePatches, getGitDiff, getGitStatus, parsePatchProposal, runTool, scanRepo, type CommandResult } from "@token-streaming/tools";
+import { CheckpointStore, RunReportStore, SessionHistoryStore, type RollbackPreview, type ToolCallSummary } from "@token-streaming/storage";
+import {
+  applyFilePatches,
+  getGitDiff,
+  getGitStatus,
+  listToolCatalog,
+  parsePatchProposal,
+  runReadOnlyTool,
+  runTool as runCatalogTool,
+  scanRepo,
+  type CommandResult,
+  type ToolCatalogEntry
+} from "@token-streaming/tools";
 import { buildRuntimeContext, type RecentHistoryItem, type RuntimeContextBundle } from "./context/context-builder.js";
 import { buildRepairPrompt, buildRuntimePrompt } from "./context/prompt-builder.js";
 import { resolveModeProfile, type ModeProfile } from "./modes/mode-profile.js";
 import { DenyApprovalHost, type ApprovalHost } from "./permissions/approval.js";
-import { evaluateCommandPolicy, evaluatePatchPolicy } from "./permissions/policy.js";
+import { evaluateCommandPolicy, evaluatePatchPolicy, evaluateTestRunPolicy, evaluateToolPolicy } from "./permissions/policy.js";
 import { SessionManager } from "./session/session-manager.js";
 import { StrategyRegistry } from "./strategy/registry.js";
 import type { OrchestrationStrategy } from "./strategy/types.js";
@@ -86,6 +97,22 @@ export interface PlanPreviewResult {
   context: RuntimeContextBundle;
 }
 
+export interface RuntimeToolRunInput {
+  name: string;
+  input?: Record<string, unknown>;
+}
+
+export interface RuntimeToolRunResult {
+  tool: ToolCatalogEntry;
+  permission: PermissionDecision;
+  approval?: ApprovalResponse;
+  output: unknown;
+}
+
+export type RuntimeRollbackResult =
+  | ({ kind: "rollback-preview"; dryRun: true } & RollbackPreview)
+  | { kind: "rollback"; dryRun: false; checkpointId: string; restoredFiles: string[] };
+
 export class TokenStreamingRuntime {
   private readonly sessionManager = new SessionManager();
   private readonly strategy: OrchestrationStrategy;
@@ -107,12 +134,14 @@ export class TokenStreamingRuntime {
   async previewPlan(task: string): Promise<PlanPreviewResult> {
     const repo = await scanRepo(this.repoRoot);
     const manifest = await loadRepoManifest(this.repoRoot);
-    const plan = await this.strategy.createPlan({
-      task,
-      mode: this.mode,
-      repo,
-      manifest
-    });
+    const plan = normalizeExecutionPlan(
+      await this.strategy.createPlan({
+        task,
+        mode: this.mode,
+        repo,
+        manifest
+      })
+    );
     const recentHistory = await this.loadRecentHistoryContext();
     const context = await buildRuntimeContext(task, repo, manifest, plan, { recentHistory });
 
@@ -121,6 +150,72 @@ export class TokenStreamingRuntime {
       manifest,
       plan,
       context
+    };
+  }
+
+  async planTask(input: string | { task: string }): Promise<ExecutionPlan> {
+    return (await this.previewPlan(readTaskInput(input))).plan;
+  }
+
+  async inspectContext(input: string | { task: string }): Promise<RuntimeContextBundle> {
+    return (await this.previewPlan(readTaskInput(input))).context;
+  }
+
+  async validateManifest(): Promise<ManifestValidationResult> {
+    const manifest = await loadRepoManifest(this.repoRoot);
+    return validateRepoManifest(this.repoRoot, manifest);
+  }
+
+  listTools(): ToolCatalogEntry[] {
+    return listToolCatalog();
+  }
+
+  async runTool(input: RuntimeToolRunInput): Promise<RuntimeToolRunResult> {
+    const tool = listToolCatalog().find((candidate) => candidate.name === input.name);
+    if (!tool) {
+      throw new Error(`Unknown tool "${input.name}".`);
+    }
+    const toolInput = {
+      ...(input.input ?? {}),
+      repoRoot: this.repoRoot
+    };
+    const permission = input.name === "test.run" ? evaluateTestRunPolicy(await loadRepoManifest(this.repoRoot), toolInput) : evaluateToolPolicy(tool);
+    let approval: ApprovalResponse | undefined;
+    if (!permission.allowed) {
+      if (input.name !== "test.run" || !permission.requiresApproval) {
+        throw new Error(`Tool blocked by runtime policy: ${permission.reasons.join("; ")}`);
+      }
+      const request = {
+        id: createId("apr"),
+        target: permission.target,
+        action: permission.action,
+        severity: permission.severity,
+        reasons: permission.reasons
+      };
+      approval = await this.approvalHost.requestApproval(request);
+      if (!approval.approved) {
+        throw new Error(`Tool blocked by approval: ${approval.reason ?? permission.reasons.join("; ")}`);
+      }
+    }
+    const output = input.name === "test.run" ? await runCatalogTool(input.name, toolInput) : await runReadOnlyTool(input.name, toolInput);
+    return { tool, permission, approval, output };
+  }
+
+  async rollback(checkpointId: string, options: { dryRun?: boolean } = {}): Promise<RuntimeRollbackResult> {
+    const store = new CheckpointStore(this.repoRoot);
+    const resolvedCheckpointId = await resolveRuntimeCheckpointId(store, checkpointId);
+    if (options.dryRun) {
+      return {
+        kind: "rollback-preview",
+        dryRun: true,
+        ...(await store.previewRollback(resolvedCheckpointId))
+      };
+    }
+    return {
+      kind: "rollback",
+      dryRun: false,
+      checkpointId: resolvedCheckpointId,
+      restoredFiles: await store.rollback(resolvedCheckpointId)
     };
   }
 
@@ -301,7 +396,7 @@ export class TokenStreamingRuntime {
           session.id,
           eventLog,
           manifest,
-          plan.testCommands,
+          plan.verificationCommands,
           shouldSkipTests,
           permissionDecisions,
           approvalResponses,
@@ -351,7 +446,7 @@ export class TokenStreamingRuntime {
             session.id,
             eventLog,
             manifest,
-            plan.testCommands,
+            plan.verificationCommands,
             false,
             permissionDecisions,
             approvalResponses,
@@ -501,7 +596,7 @@ export class TokenStreamingRuntime {
       })
     );
 
-    const plan = await this.strategy.createPlan({ task, mode: this.mode, repo, manifest });
+    const plan = normalizeExecutionPlan(await this.strategy.createPlan({ task, mode: this.mode, repo, manifest }));
     await eventLog.append(
       this.sessionManager.createEvent({
         type: "plan.created",
@@ -624,7 +719,7 @@ export class TokenStreamingRuntime {
     context: RuntimeContextBundle;
     modelCalls: ModelCallRecord[];
   }): Promise<AgentRunResult[]> {
-    const phases = input.plan.phases.filter((phase) => phase.role !== "orchestrator");
+    const phases = input.plan.phases.filter((phase) => phase.required && phase.role !== "orchestrator");
     return Promise.all(
       phases.map(async (phase) => {
         const handoff = input.plan.handoffs.find((candidate) => candidate.from === phase.role);
@@ -924,7 +1019,7 @@ export class TokenStreamingRuntime {
         })
       );
 
-      const testResult = (await runTool("test.run", {
+      const testResult = (await runCatalogTool("test.run", {
         repoRoot: this.repoRoot,
         command
       })) as CommandResult;
@@ -1163,11 +1258,14 @@ function emptyRepoManifest(): RepoManifest {
 }
 
 function initializationFailurePlan(task: string, mode: ProductMode, strategy: StrategyId): ExecutionPlan {
+  const context = emptyPlanContext();
   return {
     strategy,
     mode,
     task,
+    risk: "medium",
     riskLevel: "medium",
+    context,
     phases: [
       {
         id: "initialize",
@@ -1179,9 +1277,52 @@ function initializationFailurePlan(task: string, mode: ProductMode, strategy: St
     ],
     requiredAgents: ["orchestrator"],
     handoffs: [],
+    verificationCommands: [],
     testCommands: [],
     notes: ["Initialization did not complete."]
   };
+}
+
+function normalizeExecutionPlan(plan: ExecutionPlan): ExecutionPlan {
+  const risk = plan.risk ?? plan.riskLevel ?? "medium";
+  const verificationCommands = plan.verificationCommands ?? plan.testCommands ?? [];
+  return {
+    ...plan,
+    risk,
+    riskLevel: risk,
+    context: plan.context ?? emptyPlanContext(),
+    verificationCommands,
+    testCommands: verificationCommands
+  };
+}
+
+function emptyPlanContext(): ExecutionPlan["context"] {
+  return {
+    moduleNames: [],
+    workflowNames: [],
+    publicApiPaths: [],
+    maxSourceFiles: 6,
+    maxSourceCharacters: 4_000
+  };
+}
+
+function readTaskInput(input: string | { task: string }): string {
+  const task = typeof input === "string" ? input : input.task;
+  if (!task.trim()) {
+    throw new Error("Task must be non-empty.");
+  }
+  return task;
+}
+
+async function resolveRuntimeCheckpointId(store: CheckpointStore, checkpointId: string): Promise<string> {
+  if (checkpointId !== "latest") {
+    return checkpointId;
+  }
+  const latest = (await store.list())[0];
+  if (!latest) {
+    throw new Error("No Token Streaming checkpoints found.");
+  }
+  return latest.id;
 }
 
 function emptyRuntimeContext(): RuntimeContextBundle {

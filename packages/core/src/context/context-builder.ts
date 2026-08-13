@@ -1,6 +1,8 @@
 import path from "node:path";
 import type { ExecutionPlan, RepoManifest, RepoSummary } from "@token-streaming/protocol";
 import { readTextFile } from "@token-streaming/tools";
+import { matchModuleToTask, matchWorkflowToTask } from "./manifest-relevance.js";
+import { taskTextIncludesSearchTerms } from "./search-terms.js";
 
 export interface RuntimeContextBundle {
   overview: string;
@@ -44,8 +46,8 @@ export interface RuntimeContextOptions {
   recentHistory?: RecentHistoryItem[];
 }
 
-const MAX_SOURCE_SNIPPETS = 6;
-const MAX_SNIPPET_CHARS = 4_000;
+const DEFAULT_MAX_SOURCE_SNIPPETS = 6;
+const DEFAULT_MAX_SNIPPET_CHARS = 4_000;
 
 export async function buildRuntimeContext(
   task: string,
@@ -55,12 +57,30 @@ export async function buildRuntimeContext(
   options: RuntimeContextOptions = {}
 ): Promise<RuntimeContextBundle> {
   const taskText = task.toLowerCase();
-  const moduleSelection = selectRelevantModules(taskText, manifest);
-  const workflowSelection = selectRelevantWorkflows(taskText, manifest);
+  const moduleSelection = mergePlannedSelections(selectRelevantModules(taskText, manifest), plan.context?.moduleNames ?? [], "module");
+  const workflowSelection = mergePlannedSelections(
+    selectRelevantWorkflows(taskText, manifest),
+    plan.context?.workflowNames ?? [],
+    "workflow"
+  );
   const relevantModules = moduleSelection.map((selection) => selection.target);
   const relevantWorkflows = workflowSelection.map((selection) => selection.target);
-  const sourceSelection = selectSourceCandidates(taskText, repo, manifest, relevantModules, relevantWorkflows);
-  const sourceSnippets = await loadSourceSnippets(repo, sourceSelection.candidates);
+  const sourceSelection = selectSourceCandidates(
+    taskText,
+    repo,
+    manifest,
+    relevantModules,
+    relevantWorkflows,
+    plan.context?.publicApiPaths ?? []
+  );
+  const maxSourceFiles = boundedBudget(plan.context?.maxSourceFiles, DEFAULT_MAX_SOURCE_SNIPPETS, 12);
+  const maxSourceCharacters = boundedBudget(plan.context?.maxSourceCharacters, DEFAULT_MAX_SNIPPET_CHARS, 8_000);
+  const sourceSnippets = await loadSourceSnippets(
+    repo,
+    sourceSelection.candidates,
+    maxSourceFiles,
+    maxSourceCharacters
+  );
   const loadedSnippetPaths = new Set(sourceSnippets.map((snippet) => snippet.path));
   const sourceReasons = sourceSelection.reasons.filter((reason) => loadedSnippetPaths.has(reason.target));
   const selectionReasons = [...moduleSelection, ...workflowSelection, ...sourceReasons];
@@ -71,7 +91,7 @@ export async function buildRuntimeContext(
     relevantWorkflows,
     selectionReasons,
     sourceSnippets,
-    testCommands: plan.testCommands,
+    testCommands: plan.verificationCommands ?? plan.testCommands ?? [],
     recentHistory: options.recentHistory ?? []
   };
 }
@@ -134,7 +154,7 @@ function renderOverview(
       : ["- none"]),
     "",
     "## Plan",
-    `Risk: ${plan.riskLevel}`,
+    `Risk: ${plan.risk ?? plan.riskLevel}`,
     `Phases: ${plan.phases.map((phase) => phase.id).join(", ")}`,
     "Handoffs:",
     ...(plan.handoffs.length
@@ -142,7 +162,7 @@ function renderOverview(
       : ["- none"]),
     `Relevant modules: ${relevantModules.join(", ") || "none inferred"}`,
     `Relevant workflows: ${relevantWorkflows.join(", ") || "none inferred"}`,
-    `Test commands: ${plan.testCommands.join(", ") || "none"}`,
+    `Test commands: ${(plan.verificationCommands ?? plan.testCommands ?? []).join(", ") || "none"}`,
     "",
     "## Selection Reasons",
     ...(selectionReasons.length ? selectionReasons.map((reason) => `- ${reason.kind}:${reason.target}: ${reason.reason}`) : ["- none"]),
@@ -188,12 +208,14 @@ function renderRecentHistory(history: RecentHistoryItem[]): string[] {
 
 async function loadSourceSnippets(
   repo: RepoSummary,
-  candidates: string[]
+  candidates: string[],
+  maxSourceFiles: number,
+  maxSourceCharacters: number
 ): Promise<SourceSnippet[]> {
   const snippets: SourceSnippet[] = [];
 
   for (const candidate of candidates) {
-    if (snippets.length >= MAX_SOURCE_SNIPPETS) {
+    if (snippets.length >= maxSourceFiles) {
       break;
     }
 
@@ -201,8 +223,8 @@ async function loadSourceSnippets(
       const content = await readTextFile(repo.root, candidate);
       snippets.push({
         path: candidate,
-        content: trimTo(content, MAX_SNIPPET_CHARS),
-        truncated: content.trim().length > MAX_SNIPPET_CHARS
+        content: trimTo(content, maxSourceCharacters),
+        truncated: content.trim().length > maxSourceCharacters
       });
     } catch {
       // Candidate selection is best-effort; missing or binary-looking files should not stop planning.
@@ -215,21 +237,15 @@ async function loadSourceSnippets(
 function selectRelevantModules(taskText: string, manifest: RepoManifest): ContextSelectionReason[] {
   const selections: ContextSelectionReason[] = [];
   for (const module of manifest.modules) {
-    if (taskText.includes(module.name.toLowerCase())) {
+    const match = matchModuleToTask(taskText, module);
+    if (match) {
       selections.push({
         kind: "module",
         target: module.name,
-        reason: `Task text mentions module name "${module.name}".`
-      });
-      continue;
-    }
-
-    const matchingRule = module.rules.find((rule) => taskTextIncludesWords(taskText, rule));
-    if (matchingRule) {
-      selections.push({
-        kind: "module",
-        target: module.name,
-        reason: `Task text overlaps module rule "${matchingRule}".`
+        reason:
+          match.field === "name"
+            ? `Task text mentions module name "${module.name}".`
+            : `Task text overlaps module ${match.field} "${match.value}".`
       });
     }
   }
@@ -239,21 +255,15 @@ function selectRelevantModules(taskText: string, manifest: RepoManifest): Contex
 function selectRelevantWorkflows(taskText: string, manifest: RepoManifest): ContextSelectionReason[] {
   const selections: ContextSelectionReason[] = [];
   for (const workflow of manifest.workflows) {
-    if (taskText.includes(workflow.name.toLowerCase())) {
+    const match = matchWorkflowToTask(taskText, workflow);
+    if (match) {
       selections.push({
         kind: "workflow",
         target: workflow.name,
-        reason: `Task text mentions workflow name "${workflow.name}".`
-      });
-      continue;
-    }
-
-    const matchingTouch = workflow.touches.find((touch) => taskText.includes(touch.toLowerCase()));
-    if (matchingTouch) {
-      selections.push({
-        kind: "workflow",
-        target: workflow.name,
-        reason: `Task text mentions workflow touch "${matchingTouch}".`
+        reason:
+          match.field === "name"
+            ? `Task text mentions workflow name "${workflow.name}".`
+            : `Task text overlaps workflow ${match.field} "${match.value}".`
       });
     }
   }
@@ -265,12 +275,23 @@ function selectSourceCandidates(
   repo: RepoSummary,
   manifest: RepoManifest,
   relevantModules: string[],
-  relevantWorkflows: string[]
+  relevantWorkflows: string[],
+  plannedPublicApiPaths: string[]
 ): { candidates: string[]; reasons: ContextSelectionReason[] } {
   const candidates = new Set<string>();
   const reasons = new Map<string, ContextSelectionReason>();
   const relevantModuleSet = new Set(relevantModules);
   const relevantWorkflowSet = new Set(relevantWorkflows);
+
+  for (const apiPath of plannedPublicApiPaths) {
+    const normalized = normalizeRepoPath(apiPath);
+    candidates.add(normalized);
+    reasons.set(normalized, {
+      kind: "source",
+      target: normalized,
+      reason: "Execution plan selected this declared public API file."
+    });
+  }
 
   for (const module of manifest.modules) {
     if (relevantModuleSet.has(module.name) || relevantModuleSet.size === 0) {
@@ -316,7 +337,7 @@ function selectSourceCandidates(
       continue;
     }
 
-    if (taskTextIncludesWords(taskText, normalizedFile)) {
+    if (taskTextIncludesSearchTerms(taskText, normalizedFile)) {
       candidates.add(normalizedFile);
       reasons.set(normalizedFile, {
         kind: "source",
@@ -333,6 +354,31 @@ function selectSourceCandidates(
       .map((candidate) => reasons.get(candidate))
       .filter((reason): reason is ContextSelectionReason => reason !== undefined)
   };
+}
+
+function mergePlannedSelections(
+  inferred: ContextSelectionReason[],
+  plannedTargets: string[],
+  kind: "module" | "workflow"
+): ContextSelectionReason[] {
+  const selections = new Map(inferred.map((selection) => [selection.target, selection]));
+  for (const target of plannedTargets) {
+    if (!selections.has(target)) {
+      selections.set(target, {
+        kind,
+        target,
+        reason: "Execution strategy selected this context boundary."
+      });
+    }
+  }
+  return [...selections.values()];
+}
+
+function boundedBudget(value: number | undefined, fallback: number, upperBound: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return fallback;
+  }
+  return Math.min(Math.floor(value), upperBound);
 }
 
 function toRelativeManifestNeighbor(repoRoot: string, manifestPath: string, fileName: string): string {
@@ -360,7 +406,14 @@ function normalizeRepoPath(file: string): string {
 
 function trimTo(value: string, maxLength: number): string {
   const normalized = value.trim();
-  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength)}\n... truncated ...`;
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  const marker = "\n... truncated ...";
+  if (maxLength <= marker.length) {
+    return marker.slice(0, maxLength);
+  }
+  return `${normalized.slice(0, maxLength - marker.length)}${marker}`;
 }
 
 function renderYamlRecord(value: Record<string, unknown> | undefined, fallback: string): string {
@@ -376,16 +429,4 @@ function renderYamlRecord(value: Record<string, unknown> | undefined, fallback: 
       return `${key}: ${String(entry ?? "")}`;
     })
     .join("\n");
-}
-
-function taskTextIncludesWords(taskText: string, value: string): boolean {
-  const words = value
-    .toLowerCase()
-    .split(/[^a-z0-9_-]+/)
-    .filter((word) => word.length > 3 && !isGenericMatchWord(word));
-  return words.some((word) => taskText.includes(word));
-}
-
-function isGenericMatchWord(word: string): boolean {
-  return new Set(["module", "yaml", "yml", "json", "index", "readme", "src", "packages", "apps", "test", "tests"]).has(word);
 }

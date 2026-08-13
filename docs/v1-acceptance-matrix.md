@@ -13,14 +13,14 @@ Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after
 | Requirement | Status | Evidence |
 | --- | --- | --- |
 | CLI host | Complete | `apps/cli/src/index.ts`; CLI JSON tests |
-| Headless core | Complete | `TokenStreamingRuntime`, reusable package APIs |
+| Headless core | Complete | direct `planTask`/`inspectContext`/`validateManifest`/`listTools`/`runTool`/`rollback` tests plus isolated packed-consumer smoke |
 | Session Manager | Complete | `packages/core/src/session`; session history tests |
 | Repo Scanner | Complete | `packages/tools/src/repo-scanner.ts`; tool tests |
 | `.ai/` manifest loader | Complete | `packages/ai-manifest/src/loader.ts`; loader tests |
 | Foreign-repo fallback generator | Complete | `packages/ai-manifest/src/generator.ts`; JS and Python inference tests |
 | Context Builder | Complete | metadata-first context, reasons, source snippets, recent history tests |
-| Default Strategy | Complete | strategy phases, roles, handoffs, risk and targeted-test tests |
-| Agent role phases | Complete | `orchestrator`, `researcher`, `coder`, `tester`, `reviewer` contracts; handoff and advisory parallel-agent tests |
+| Default Strategy | Complete | canonical plan fields, task classification, roles, handoffs, context budgets, risk and targeted-verification tests |
+| Agent role phases | Complete | required-role activation for `orchestrator`, `researcher`, `coder`, `tester`, and `reviewer`; handoff and advisory parallel-agent tests |
 | Tool Runtime | Complete | typed catalog and controlled executor tests |
 | Permission System | Complete | patch, command, tool and approval-host tests |
 | Patch Engine | Complete | structured proposal parser, repo and symlink boundary tests |
@@ -33,7 +33,7 @@ Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after
 | Stub provider | Complete | deterministic offline runtime and CLI tests |
 | OpenAI provider adapter | Complete, live pending | Responses and Chat Completions adapters; mock HTTP probe passes; external probe needs a key |
 | Strategy extension point | Complete | registry and injected custom-strategy tests |
-| Mode extension point | Complete | economy/max/auto profiles and routing tests |
+| Mode extension point | Complete | economy low-reasoning/light-context/light-verification, auto risk review, and max high-reasoning/required-review tests |
 | Module/workflow manifests | Complete | loader, validator, context and strategy selection tests |
 
 ## Behavioral Acceptance
@@ -42,7 +42,7 @@ Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after
 | --- | --- | --- |
 | `manifest init` creates the standard | Complete | CLI and generator tests |
 | `manifest generate` creates fallback mapping | Complete | CLI and generator tests |
-| `plan` exposes phases, roles, context and tests | Complete | CLI plan JSON tests |
+| `plan` exposes phases, roles, bounded context and canonical verification commands | Complete | strategy, context-budget and CLI plan JSON tests |
 | `context inspect` explains selections | Complete | context JSON and selection-reason tests |
 | Model output cannot write directly | Complete | only parsed `PatchProposal` reaches patch handling |
 | Checkpoint exists before write | Complete | runtime patch flow and event assertions |
@@ -52,7 +52,7 @@ Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after
 | Every initialized run has session log and report | Complete | success, model failure, malformed patch and initialization failure tests |
 | Rollback restores pre-patch state | Complete | checkpoint and CLI rollback tests |
 | Core commands expose machine-readable output | Complete | CLI JSON/JSONL surface tests |
-| Runtime, manifest, tools, storage and CLI are tested | Complete | full `pnpm test` suite |
+| Runtime, manifest, tools, storage and CLI are tested | Complete | full `pnpm test` suite plus packed CLI/headless-core installation smoke |
 
 ## Final Verification
 

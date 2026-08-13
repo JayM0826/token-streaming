@@ -52,6 +52,9 @@ test("TokenStreamingRuntime can run a registered custom strategy", async () => {
 
     assert.equal(result.session.strategy, "custom-test");
     assert.equal(result.plan.strategy, "custom-test");
+    assert.equal(result.plan.risk, "low");
+    assert.deepEqual(result.plan.context.moduleNames, []);
+    assert.deepEqual(result.plan.verificationCommands, []);
     assert.deepEqual(result.plan.phases.map((phase) => phase.id), ["custom-phase"]);
     assert.match(result.summary, /custom-test strategy/);
   } finally {
@@ -86,7 +89,7 @@ test("TokenStreamingRuntime uses mode profiles for model reasoning effort", asyn
       dryRun: true
     });
 
-    assert.equal(economyProvider.requests[0]?.reasoningEffort, "medium");
+    assert.equal(economyProvider.requests[0]?.reasoningEffort, "low");
     assert.equal(maxProvider.requests[0]?.reasoningEffort, "high");
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
@@ -173,15 +176,15 @@ test("TokenStreamingRuntime can run optional parallel role agents before plannin
 
     assert.deepEqual(
       result.agentRuns.map((run) => run.role).sort(),
-      ["coder", "researcher", "reviewer", "tester"]
+      ["coder", "researcher", "tester"]
     );
     assert.equal(result.agentRuns.every((run) => run.ok), true);
-    assert.equal(result.modelCalls.filter((call) => call.purpose === "agent").length, 4);
+    assert.equal(result.modelCalls.filter((call) => call.purpose === "agent").length, 3);
     assert.equal(result.modelCalls.filter((call) => call.purpose === "planning").length, 1);
-    assert.equal(events.filter((event) => event.type === "agent.started").length, 4);
-    assert.equal(events.filter((event) => event.type === "agent.finished" && event.ok).length, 4);
+    assert.equal(events.filter((event) => event.type === "agent.started").length, 3);
+    assert.equal(events.filter((event) => event.type === "agent.finished" && event.ok).length, 3);
     assert.match(provider.requests.at(-1)?.messages.at(-1)?.content, /## Parallel Agent Artifacts/);
-    assert.match(result.summary, /Parallel agent artifacts: 4/);
+    assert.match(result.summary, /Parallel agent artifacts: 3/);
     assert.match(report, /## Agent Runs/);
     assert.match(report, /researcher\/research: ok/);
   } finally {

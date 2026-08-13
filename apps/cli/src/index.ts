@@ -20,6 +20,7 @@ import {
   StrategyRegistry,
   TokenStreamingRuntime,
   evaluateCommandPolicy,
+  evaluateTestRunPolicy,
   evaluateToolPolicy,
   type ApprovalHost
 } from "@token-streaming/core";
@@ -1825,7 +1826,15 @@ async function writeToolFailureReport(
     strategy: args.strategy,
     mode: args.mode,
     task: `tools run ${toolName}`,
+    risk: policy.severity,
     riskLevel: policy.severity,
+    context: {
+      moduleNames: [],
+      workflowNames: [],
+      publicApiPaths: [],
+      maxSourceFiles: 0,
+      maxSourceCharacters: 0
+    },
     phases: [
       {
         id: "tool-policy",
@@ -1837,6 +1846,7 @@ async function writeToolFailureReport(
     ],
     requiredAgents: ["orchestrator"],
     handoffs: [],
+    verificationCommands: [],
     testCommands: [],
     notes: [`Tool risk: ${risk}`, `Policy: ${policy.allowed ? "allowed" : "blocked"}`]
   };
@@ -1912,7 +1922,11 @@ async function printPlanPreview(args: ParsedArgs): Promise<void> {
   );
   console.log("");
   console.log("Verification commands:");
-  console.log(result.plan.testCommands.length ? result.plan.testCommands.map((command) => `- ${command}`).join("\n") : "- none");
+  console.log(
+    result.plan.verificationCommands.length
+      ? result.plan.verificationCommands.map((command) => `- ${command}`).join("\n")
+      : "- none"
+  );
   console.log("");
   console.log("Relevant context:");
   console.log(`- modules: ${result.context.relevantModules.join(", ") || "none inferred"}`);
@@ -2368,59 +2382,6 @@ function parseToolJsonInput(raw: string): Record<string, unknown> {
   }
 
   return parsed as Record<string, unknown>;
-}
-
-function evaluateTestRunPolicy(manifest: Awaited<ReturnType<typeof loadRepoManifest>>, input: Record<string, unknown>): PermissionDecision {
-  const command = stringOrUndefined(input.command);
-  if (!command) {
-    return {
-      target: "tool",
-      action: "test.run",
-      allowed: false,
-      severity: "medium",
-      reasons: ['Tool input requires non-empty string field "command".'],
-      requiresApproval: false
-    };
-  }
-
-  const declaredCommands = listDeclaredTestCommands(manifest);
-  if (!declaredCommands.includes(command)) {
-    return {
-      target: "tool",
-      action: "test.run",
-      allowed: false,
-      severity: "medium",
-      reasons: [`Test command is not declared in .ai/tests.yaml, module.yaml, or flow.yaml: ${command}`],
-      requiresApproval: false
-    };
-  }
-
-  const commandDecision = evaluateCommandPolicy(manifest, command);
-  if (!commandDecision.allowed) {
-    return {
-      ...commandDecision,
-      target: "tool",
-      action: "test.run",
-      reasons: commandDecision.reasons
-    };
-  }
-
-  return {
-    target: "tool",
-    action: "test.run",
-    allowed: true,
-    severity: "medium",
-    reasons: [`Manifest-declared test command approved: ${command}`],
-    requiresApproval: false
-  };
-}
-
-function listDeclaredTestCommands(manifest: Awaited<ReturnType<typeof loadRepoManifest>>): string[] {
-  return [
-    ...stringArrayFromRecord(manifest.tests, "default"),
-    ...manifest.modules.flatMap((module) => module.testCommands),
-    ...manifest.workflows.flatMap((workflow) => workflow.testCommands)
-  ].filter((command, index, commands) => command.trim().length > 0 && commands.indexOf(command) === index);
 }
 
 function redactToolInput(input: Record<string, unknown>): Record<string, unknown> {

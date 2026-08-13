@@ -395,6 +395,10 @@ test("CLI exposes plan previews as JSON", async () => {
   assert.equal(output.task, "fix payment checkout");
   assert.equal(output.plan.strategy, "default");
   assert.equal(output.plan.mode, "auto");
+  assert.equal(output.plan.risk, output.plan.riskLevel);
+  assert.equal(output.plan.context.moduleNames.includes("payment"), true);
+  assert.equal(output.plan.context.workflowNames.includes("checkout"), true);
+  assert.deepEqual(output.plan.verificationCommands, output.plan.testCommands);
   assert.equal(output.plan.requiredAgents.includes("coder"), true);
   assert.equal(output.context.relevantModules.includes("payment"), true);
   assert.equal(output.context.relevantWorkflows.includes("checkout"), true);
@@ -598,16 +602,16 @@ test("CLI run JSON exposes optional parallel agent runs", async () => {
   assert.equal(output.parallelAgents, true);
   assert.deepEqual(
     output.agentRuns.map((run) => run.role).sort(),
-    ["coder", "researcher", "reviewer", "tester"]
+    ["coder", "researcher", "tester"]
   );
   assert.equal(output.agentRuns.every((run) => run.ok), true);
-  assert.equal(output.modelCalls.filter((call) => call.purpose === "agent").length, 4);
+  assert.equal(output.modelCalls.filter((call) => call.purpose === "agent").length, 3);
   assert.equal(output.modelCalls.filter((call) => call.purpose === "planning").length, 1);
-  assert.match(output.summary, /Parallel agent artifacts: 4/);
+  assert.match(output.summary, /Parallel agent artifacts: 3/);
 
   const session = runCli(["-C", cwd, "sessions", "show", output.session.id, "--json"]);
-  assert.equal(session.events.filter((event) => event.type === "agent.started").length, 4);
-  assert.equal(session.events.filter((event) => event.type === "agent.finished" && event.ok).length, 4);
+  assert.equal(session.events.filter((event) => event.type === "agent.started").length, 3);
+  assert.equal(session.events.filter((event) => event.type === "agent.finished" && event.ok).length, 3);
 });
 
 test("CLI run JSON exposes compact recent history after previous sessions", async () => {

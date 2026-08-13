@@ -35,6 +35,51 @@ test("DefaultStrategy creates coder, tester, and reviewer handoffs for change ta
       ["reviewer", "final", "risk and diff review"]
     ]
   );
+  assert.deepEqual(plan.requiredAgents, ["orchestrator", "researcher", "coder", "tester", "reviewer"]);
+  assert.equal(plan.risk, plan.riskLevel);
+  assert.deepEqual(plan.verificationCommands, plan.testCommands);
+  assert.equal(plan.context.maxSourceFiles, 6);
+  assert.equal(plan.context.maxSourceCharacters, 4_000);
+});
+
+test("DefaultStrategy varies context budgets by product mode", async () => {
+  const strategy = new DefaultStrategy();
+  const economy = await strategy.createPlan({ ...createInput("summarize repo"), mode: "economy" });
+  const max = await strategy.createPlan({ ...createInput("summarize repo"), mode: "max" });
+
+  assert.deepEqual(
+    [economy.context.maxSourceFiles, economy.context.maxSourceCharacters],
+    [3, 2_000]
+  );
+  assert.deepEqual([max.context.maxSourceFiles, max.context.maxSourceCharacters], [8, 6_000]);
+});
+
+test("DefaultStrategy makes economy verification lighter and max review mandatory", async () => {
+  const strategy = new DefaultStrategy();
+  const input = createInput("summarize repository layout", {
+    manifest: {
+      tests: {
+        default: ["pnpm test", "pnpm lint", "pnpm typecheck"]
+      }
+    }
+  });
+  const economy = await strategy.createPlan({ ...input, mode: "economy" });
+  const auto = await strategy.createPlan({ ...input, mode: "auto" });
+  const max = await strategy.createPlan({ ...input, mode: "max" });
+
+  assert.deepEqual(economy.verificationCommands, ["pnpm test"]);
+  assert.deepEqual(auto.verificationCommands, ["pnpm test", "pnpm lint", "pnpm typecheck"]);
+  assert.deepEqual(max.verificationCommands, auto.verificationCommands);
+  assert.equal(auto.phases.some((phase) => phase.role === "reviewer"), false);
+  assert.equal(max.phases.find((phase) => phase.role === "reviewer")?.required, true);
+  assert.equal(max.requiredAgents.includes("reviewer"), true);
+});
+
+test("DefaultStrategy keeps optional low-risk review out of required agents", async () => {
+  const plan = await new DefaultStrategy().createPlan(createInput("fix implementation"));
+
+  assert.equal(plan.phases.find((phase) => phase.role === "reviewer")?.required, false);
+  assert.equal(plan.requiredAgents.includes("reviewer"), false);
 });
 
 test("DefaultStrategy uses root tests.yaml default commands when no targeted manifest matches", async () => {
@@ -127,6 +172,8 @@ test("DefaultStrategy prefers targeted module commands over root defaults", asyn
   );
 
   assert.deepEqual(plan.testCommands, ["pnpm test payment"]);
+  assert.deepEqual(plan.context.moduleNames, ["payment"]);
+  assert.deepEqual(plan.context.publicApiPaths, []);
 });
 
 test("DefaultStrategy raises risk when a matched workflow declares high-risk failure modes", async () => {
@@ -210,6 +257,82 @@ test("DefaultStrategy raises risk when task text matches a safety review term", 
 
   assert.equal(plan.riskLevel, "high");
   assert.equal(plan.requiredAgents.includes("reviewer"), true);
+});
+
+test("DefaultStrategy matches Chinese manifest rules and safety review terms", async () => {
+  const plan = await new DefaultStrategy().createPlan(
+    createInput("修改发布流程并确保退款幂等性", {
+      manifest: {
+        modules: [
+          {
+            path: "/repo/src/modules/refunds/module.yaml",
+            name: "refunds",
+            description: "Refund processing",
+            owners: [],
+            publicApi: [],
+            dependsOn: [],
+            usedBy: [],
+            testCommands: [],
+            rules: ["退款逻辑必须幂等"]
+          }
+        ],
+        safety: {
+          requires_review: ["发布流程变更"]
+        }
+      }
+    })
+  );
+
+  assert.deepEqual(plan.context.moduleNames, ["refunds"]);
+  assert.deepEqual(plan.verificationCommands, []);
+  assert.equal(plan.risk, "high");
+  assert.equal(plan.requiredAgents.includes("reviewer"), true);
+});
+
+test("DefaultStrategy classifies Chinese destructive tasks as high-risk changes", async () => {
+  const plan = await new DefaultStrategy().createPlan(createInput("删除生产数据"));
+
+  assert.equal(plan.risk, "high");
+  assert.equal(plan.phases.some((phase) => phase.role === "coder" && phase.required), true);
+  assert.equal(plan.requiredAgents.includes("reviewer"), true);
+});
+
+test("DefaultStrategy targets verification from manifest descriptions and workflow steps", async () => {
+  const plan = await new DefaultStrategy().createPlan(
+    createInput("fix inventory reservation after authorization", {
+      manifest: {
+        tests: { default: ["pnpm test"] },
+        modules: [
+          {
+            path: "/repo/src/modules/stock/module.yaml",
+            name: "stock",
+            description: "Owns inventory reservation.",
+            owners: [],
+            publicApi: [],
+            dependsOn: [],
+            usedBy: [],
+            testCommands: ["pnpm test stock"],
+            rules: []
+          }
+        ],
+        workflows: [
+          {
+            path: "/repo/src/workflows/checkout/flow.yaml",
+            name: "checkout",
+            description: "Checkout flow",
+            steps: ["authorize payment"],
+            touches: [],
+            testCommands: ["pnpm test checkout"],
+            risks: []
+          }
+        ]
+      }
+    })
+  );
+
+  assert.deepEqual(plan.context.moduleNames, ["stock"]);
+  assert.deepEqual(plan.context.workflowNames, ["checkout"]);
+  assert.deepEqual(plan.verificationCommands, ["pnpm test checkout", "pnpm test stock"]);
 });
 
 function createInput(task, overrides = {}) {

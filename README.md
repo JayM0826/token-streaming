@@ -30,8 +30,26 @@ node apps/cli/dist/index.js --version
 
 `pnpm test` compiles all workspace packages and then runs the Node.js behavior tests in `packages/**/*.test.mjs` and `apps/**/*.test.mjs` against the compiled `dist` output.
 `pnpm package:check` verifies release readiness for the CLI and workspace packages: package metadata, dist entrypoints, type declarations, package file allowlists, Node engine constraints, and CLI bin shebangs.
-`pnpm package:install-check` packs all seven workspace packages, installs the tarballs in an isolated offline consumer, verifies the CLI bin shim, and runs the installed CLI entrypoint.
+`pnpm package:install-check` packs all seven workspace packages, installs the tarballs in an isolated offline consumer, verifies the CLI bin shim, and smoke-tests both the installed CLI and the public headless core API.
 `pnpm acceptance:check` runs the offline gates and, when `OPENAI_API_KEY` is present, performs its own live provider probe. Without a key, it exits incomplete with a machine-readable `missing-api-key` status.
+
+## Headless Core API
+
+The CLI is only the first host. A future desktop app can import the same runtime from `@token-streaming/core` without shelling out to the CLI:
+
+```ts
+import { TokenStreamingRuntime } from "@token-streaming/core";
+
+const runtime = new TokenStreamingRuntime({ repoRoot: process.cwd(), mode: "auto" });
+const plan = await runtime.planTask("fix checkout failure");
+const context = await runtime.inspectContext("fix checkout failure");
+const validation = await runtime.validateManifest();
+const tools = runtime.listTools();
+const result = await runtime.runTask({ task: "fix checkout failure", dryRun: true });
+const rollback = await runtime.rollback("latest", { dryRun: true });
+```
+
+`runTool()` exposes read tools plus manifest-declared `test.run` through the same permission and approval policy. Arbitrary command execution and direct patch application remain blocked so hosts cannot bypass the patch/checkpoint/verification boundary.
 
 ## CLI Usage
 
@@ -174,12 +192,15 @@ Mode behavior:
 - V1 still uses the `default` orchestration strategy.
 - `--strategy default` makes the orchestration strategy explicit without implementing speculative strategy variants.
 - `strategies list` exposes the registered strategy catalog for scripts and future desktop hosts.
-- Mode profiles tune provider reasoning effort without changing the strategy implementation.
+- `economy` uses low reasoning effort, a 3-file/2,000-character-per-file context budget, and only the first most relevant declared verification command.
+- `auto` uses a balanced 6-file/4,000-character-per-file context budget and requires reviewer participation when task or manifest risk is elevated.
+- `max` uses high reasoning effort, an 8-file/6,000-character-per-file context budget, preserves all selected verification commands, and always requires reviewer participation.
+- Modes tune resource posture inside the same `default` strategy; they are not separate orchestration strategies.
 - `.ai/models.yaml` can map each mode to a preferred model and optionally declare scored `model_candidates`.
 - Model selection priority is CLI `--model`, then scored manifest candidates, then legacy mode fields, then provider default.
 - `models select --json` exposes the routing objective, candidate scores, historical failure rates, and selection reasons for cost/effectiveness tuning.
-- Agent collaboration is represented as role phases and handoff artifacts in the execution plan.
-- `--parallel-agents` optionally runs non-orchestrator role agents concurrently before the main planning call. Their advisory artifacts are recorded as `agent.started` / `agent.finished` events, included in run reports, and fed into the main model call; they do not apply patches, run commands, or bypass permissions.
+- Agent collaboration is represented as role phases and handoff artifacts in the execution plan; `requiredAgents` contains only phases marked as required.
+- `--parallel-agents` optionally runs required non-orchestrator role agents concurrently before the main planning call. Their advisory artifacts are recorded as `agent.started` / `agent.finished` events, included in run reports, and fed into the main model call; they do not apply patches, run commands, or bypass permissions.
 - `plan` previews the default strategy, agent handoffs, selected context, and verification commands without calling a model or writing session state.
 - `context inspect` prints the full runtime context bundle and structured selection reasons for modules, workflows, source snippets, and compact recent session history, without calling a model.
 - `--json` is supported by the main run command, `plan`, `context inspect`, `manifest init/generate/inspect/validate`, `commands list`, `config inspect`, `tools list/run`, `playbooks list/show`, `workflows list/show`, `verify`, `models select`, `stats models`, `strategies list`, `history summary/prune`, `doctor repo`, `doctor models`, reports, checkpoints, rollback, diff, search, and session inspection commands for scripts and future desktop hosts.

@@ -247,12 +247,25 @@ export interface ExecutionPlan {
   strategy: StrategyId;
   mode: ProductMode;
   task: string;
+  risk: "low" | "medium" | "high";
+  context: ExecutionPlanContext;
+  verificationCommands: string[];
+  /** @deprecated Use risk. Kept for V1 JSON compatibility. */
   riskLevel: "low" | "medium" | "high";
   phases: ExecutionPhase[];
   requiredAgents: AgentRole[];
   handoffs: AgentHandoff[];
+  /** @deprecated Use verificationCommands. Kept for V1 JSON compatibility. */
   testCommands: string[];
   notes: string[];
+}
+
+export interface ExecutionPlanContext {
+  moduleNames: string[];
+  workflowNames: string[];
+  publicApiPaths: string[];
+  maxSourceFiles: number;
+  maxSourceCharacters: number;
 }
 
 export interface ExecutionPhase {

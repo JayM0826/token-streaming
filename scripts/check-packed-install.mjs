@@ -71,7 +71,32 @@ try {
     throw new Error("Packaged CLI smoke did not complete through the stub provider.");
   }
 
-  console.log(`Packed install check passed for ${packageEntries.length} packages.`);
+  const headlessSmoke = run(
+    [
+      process.execPath,
+      "--input-type=module",
+      "--eval",
+      [
+        'import { TokenStreamingRuntime } from "@token-streaming/core";',
+        "const runtime = new TokenStreamingRuntime({ repoRoot: process.cwd() });",
+        'const plan = await runtime.planTask("summarize packaged runtime");',
+        "const tools = runtime.listTools();",
+        "console.log(JSON.stringify({ risk: plan.risk, context: plan.context, verificationCommands: plan.verificationCommands, tools }));"
+      ].join("\n")
+    ],
+    consumerRoot
+  );
+  const headlessResult = parseJson(headlessSmoke.stdout, "packaged headless core smoke output");
+  if (
+    !["low", "medium", "high"].includes(headlessResult.risk) ||
+    !Number.isInteger(headlessResult.context?.maxSourceFiles) ||
+    !Array.isArray(headlessResult.verificationCommands) ||
+    !headlessResult.tools?.some((tool) => tool.name === "file.read" && tool.risk === "read")
+  ) {
+    throw new Error("Packaged headless core smoke did not expose the expected planning and tool contracts.");
+  }
+
+  console.log(`Packed install check passed for ${packageEntries.length} packages, the CLI, and the headless core.`);
 } finally {
   await rm(tempRoot, { recursive: true, force: true });
 }

@@ -11,9 +11,9 @@ export function resolveModeProfile(mode: ProductMode): ModeProfile {
   if (mode === "economy") {
     return {
       mode,
-      planningReasoningEffort: "medium",
-      repairReasoningEffort: "medium",
-      description: "Prefer lower-cost execution while still allowing bounded repair reasoning."
+      planningReasoningEffort: "low",
+      repairReasoningEffort: "low",
+      description: "Prefer low-cost reasoning, bounded context, and the lightest declared verification."
     };
   }
 

@@ -1,4 +1,6 @@
-import type { AgentHandoff, AgentRole, ExecutionPhase, ExecutionPlan, StrategyInput } from "@token-streaming/protocol";
+import type { AgentHandoff, AgentRole, ExecutionPhase, ExecutionPlan, ExecutionPlanContext, StrategyInput } from "@token-streaming/protocol";
+import { matchModuleToTask, matchWorkflowToTask } from "../context/manifest-relevance.js";
+import { extractSearchTerms } from "../context/search-terms.js";
 import type { OrchestrationStrategy } from "./types.js";
 
 export class DefaultStrategy implements OrchestrationStrategy {
@@ -7,31 +9,60 @@ export class DefaultStrategy implements OrchestrationStrategy {
   async createPlan(input: StrategyInput): Promise<ExecutionPlan> {
     const taskKind = classifyTask(input.task);
     const riskLevel = detectRisk(input);
-    const phases = createPhases(taskKind, riskLevel);
-    const requiredAgents = [...new Set(phases.map((phase) => phase.role))];
+    const phases = createPhases(taskKind, riskLevel, input.mode);
+    const requiredAgents = [...new Set(phases.filter((phase) => phase.required).map((phase) => phase.role))];
+    const verificationCommands = selectVerificationCommands(input);
 
     return {
       strategy: this.id,
       mode: input.mode,
       task: input.task,
+      risk: riskLevel,
       riskLevel,
+      context: createPlanContext(input),
       phases,
       requiredAgents,
       handoffs: createHandoffs(phases),
-      testCommands: selectTestCommands(input),
+      verificationCommands,
+      testCommands: verificationCommands,
       notes: createNotes(input, taskKind, riskLevel)
     };
   }
+}
+
+function createPlanContext(input: StrategyInput): ExecutionPlanContext {
+  const taskText = input.task.toLowerCase();
+  const selectedModules = input.manifest.modules.filter((module) => matchModuleToTask(taskText, module));
+  const selectedWorkflows = input.manifest.workflows.filter((workflow) => matchWorkflowToTask(taskText, workflow));
+  const publicApiModules = selectedModules.length > 0 ? selectedModules : input.manifest.modules;
+  const budget = contextBudget(input.mode);
+
+  return {
+    moduleNames: selectedModules.map((module) => module.name),
+    workflowNames: selectedWorkflows.map((workflow) => workflow.name),
+    publicApiPaths: [...new Set(publicApiModules.flatMap((module) => module.publicApi))],
+    ...budget
+  };
+}
+
+function contextBudget(mode: StrategyInput["mode"]): Pick<ExecutionPlanContext, "maxSourceFiles" | "maxSourceCharacters"> {
+  if (mode === "economy") {
+    return { maxSourceFiles: 3, maxSourceCharacters: 2_000 };
+  }
+  if (mode === "max") {
+    return { maxSourceFiles: 8, maxSourceCharacters: 6_000 };
+  }
+  return { maxSourceFiles: 6, maxSourceCharacters: 4_000 };
 }
 
 type TaskKind = "question" | "understanding" | "change";
 
 function classifyTask(task: string): TaskKind {
   const normalized = task.toLowerCase();
-  if (/(implement|add|fix|change|modify|refactor|create|update|delete|rename|生成|实现|修复|修改|重构)/i.test(normalized)) {
+  if (/(implement|add|fix|change|modify|refactor|create|update|delete|rename|生成|实现|修复|修改|重构|新增|添加|创建|更新|删除|重命名)/i.test(normalized)) {
     return "change";
   }
-  if (/(explain|summarize|inspect|analyze|review|理解|分析|解释|总结)/i.test(normalized)) {
+  if (/(explain|summarize|inspect|analyze|review|理解|分析|解释|总结|检查|审查)/i.test(normalized)) {
     return "understanding";
   }
   return "question";
@@ -44,7 +75,7 @@ function detectRisk(input: StrategyInput): ExecutionPlan["riskLevel"] {
     .map((module) => module.name.toLowerCase());
   const safetyTerms = extractSafetyTerms(input.manifest.safety);
 
-  if (/(auth|payment|billing|security|permission|delete|migration|prod|secret|token)/i.test(task)) {
+  if (containsHighRiskTerms(task)) {
     return "high";
   }
 
@@ -52,34 +83,29 @@ function detectRisk(input: StrategyInput): ExecutionPlan["riskLevel"] {
     return "high";
   }
 
-  const matchingWorkflow = input.manifest.workflows.find(
-    (workflow) => task.includes(workflow.name.toLowerCase()) || workflow.touches.some((touch) => task.includes(touch.toLowerCase()))
-  );
+  const matchingWorkflow = input.manifest.workflows.find((workflow) => matchWorkflowToTask(task, workflow));
   if (matchingWorkflow) {
     const riskText = matchingWorkflow.risks.join(" ").toLowerCase();
-    return /(auth|payment|billing|security|permission|delete|migration|prod|secret|token|irreversible|data loss|rollback)/i.test(riskText)
-      ? "high"
-      : "medium";
+    return containsHighRiskTerms(riskText) ? "high" : "medium";
   }
 
   return "low";
 }
 
-function extractSafetyTerms(safety: Record<string, unknown> | undefined): string[] {
-  const values = [...stringArrayFromRecord(safety, "sensitive_paths"), ...stringArrayFromRecord(safety, "requires_review")];
-  return [
-    ...new Set(
-      values.flatMap((value) =>
-        value
-          .toLowerCase()
-          .split(/[^a-z0-9_-]+/)
-          .filter((term) => term.length > 3 && !["src", "packages", "apps", "files", "changes"].includes(term))
-      )
-    )
-  ];
+function containsHighRiskTerms(value: string): boolean {
+  return /(auth|payment|billing|security|permission|delete|migration|prod|secret|token|irreversible|data loss|rollback|认证|鉴权|支付|账单|安全|权限|删除|迁移|生产|密钥|秘密|令牌|不可逆|数据丢失|回滚)/i.test(value);
 }
 
-function createPhases(taskKind: TaskKind, riskLevel: ExecutionPlan["riskLevel"]): ExecutionPhase[] {
+function extractSafetyTerms(safety: Record<string, unknown> | undefined): string[] {
+  const values = [...stringArrayFromRecord(safety, "sensitive_paths"), ...stringArrayFromRecord(safety, "requires_review")];
+  return [...new Set(values.flatMap(extractSearchTerms))];
+}
+
+function createPhases(
+  taskKind: TaskKind,
+  riskLevel: ExecutionPlan["riskLevel"],
+  mode: StrategyInput["mode"]
+): ExecutionPhase[] {
   const phases: ExecutionPhase[] = [
     {
       id: "research",
@@ -107,13 +133,13 @@ function createPhases(taskKind: TaskKind, riskLevel: ExecutionPlan["riskLevel"])
     });
   }
 
-  if (taskKind === "change" || riskLevel !== "low") {
+  if (taskKind === "change" || riskLevel !== "low" || mode === "max") {
     phases.push({
       id: "review",
       role: "reviewer",
       title: "Review resulting diff",
       description: "Review risk, module rules, workflow rules, and safety constraints.",
-      required: riskLevel !== "low"
+      required: riskLevel !== "low" || mode === "max"
     });
   }
 
@@ -154,37 +180,35 @@ function handoffDescription(phase: ExecutionPhase, nextPhase: ExecutionPhase | u
   return `${phase.title} produces ${artifactForPhase(phase)} for the ${target}.`;
 }
 
-function selectTestCommands(input: StrategyInput): string[] {
+function selectVerificationCommands(input: StrategyInput): string[] {
   const taskText = input.task.toLowerCase();
   const workflowCommands = input.manifest.workflows
-    .filter(
-      (workflow) =>
-        taskText.includes(workflow.name.toLowerCase()) || workflow.touches.some((touch) => taskText.includes(touch.toLowerCase()))
-    )
+    .filter((workflow) => matchWorkflowToTask(taskText, workflow))
     .flatMap((workflow) => workflow.testCommands);
   const moduleCommands = input.manifest.modules
-    .filter((module) => taskText.includes(module.name.toLowerCase()))
+    .filter((module) => matchModuleToTask(taskText, module))
     .flatMap((module) => module.testCommands);
   const targetedCommands = [...workflowCommands, ...moduleCommands];
 
+  let commands: string[];
   if (targetedCommands.length > 0) {
-    return [...new Set(targetedCommands)];
+    commands = [...new Set(targetedCommands)];
+  } else {
+    const manifestDefaultCommands = stringArrayFromRecord(input.manifest.tests, "default");
+    if (manifestDefaultCommands.length > 0) {
+      commands = manifestDefaultCommands;
+    } else if (input.repo.verificationCommands?.length) {
+      commands = input.repo.verificationCommands;
+    } else {
+      const scripts = input.repo.scripts;
+      const candidates = ["test", "typecheck", "lint"].filter(
+        (script) => scripts[script] && !(script === "test" && isPlaceholderTestScript(scripts[script] ?? ""))
+      );
+      commands = candidates.map((script) => `${input.repo.packageManager ?? "pnpm"} run ${script}`);
+    }
   }
 
-  const manifestDefaultCommands = stringArrayFromRecord(input.manifest.tests, "default");
-  if (manifestDefaultCommands.length > 0) {
-    return manifestDefaultCommands;
-  }
-
-  if (input.repo.verificationCommands?.length) {
-    return input.repo.verificationCommands;
-  }
-
-  const scripts = input.repo.scripts;
-  const candidates = ["test", "typecheck", "lint"].filter(
-    (script) => scripts[script] && !(script === "test" && isPlaceholderTestScript(scripts[script] ?? ""))
-  );
-  return candidates.map((script) => `${input.repo.packageManager ?? "pnpm"} run ${script}`);
+  return input.mode === "economy" ? commands.slice(0, 1) : commands;
 }
 
 function isPlaceholderTestScript(command: string): boolean {
