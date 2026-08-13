@@ -71,7 +71,8 @@ Run a real provider acceptance probe:
 export OPENAI_API_KEY="..."
 export OPENAI_BASE_URL="https://api.openai.com/v1"
 export OPENAI_API_PROTOCOL="responses"
+export OPENAI_MODEL="gpt-5.5"
 pnpm acceptance:check -- --json
 ```
 
-For a relay that only supports Chat Completions, use `OPENAI_API_PROTOCOL=chat-completions`.
+For a relay, set `OPENAI_MODEL` to its exposed model name. If it only supports Chat Completions, also use `OPENAI_API_PROTOCOL=chat-completions`.

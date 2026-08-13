@@ -12,7 +12,8 @@ test("acceptance check reports missing OpenAI live smoke as incomplete", () => {
     cwd: repoRoot,
     env: {
       ...process.env,
-      OPENAI_API_KEY: ""
+      OPENAI_API_KEY: "",
+      OPENAI_MODEL: ""
     },
     encoding: "utf8"
   });
@@ -43,7 +44,8 @@ test("acceptance check verifies Responses and Chat Completions provider probes",
           ...process.env,
           OPENAI_API_KEY: "relay-key",
           OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
-          OPENAI_API_PROTOCOL: protocol
+          OPENAI_API_PROTOCOL: protocol,
+          OPENAI_MODEL: "relay-model"
         },
         encoding: "utf8"
       });
@@ -55,6 +57,7 @@ test("acceptance check verifies Responses and Chat Completions provider probes",
       assert.equal(output.liveSmoke.status, "verified");
       assert.equal(output.liveSmoke.verified, true);
       assert.equal(output.liveSmoke.apiProtocol, protocol);
+      assert.equal(output.liveSmoke.model, "relay-model");
       assert.equal(output.liveSmoke.endpoint, `http://127.0.0.1:${port}/v1/${endpoint}`);
       assert.match(output.results.find((step) => step.name === "repository-doctor")?.command ?? "", /--probe/);
     }

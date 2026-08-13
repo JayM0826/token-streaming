@@ -5,6 +5,7 @@ export interface ModelSelectionInput {
   mode: ProductMode;
   requestedProvider?: ProviderName;
   requestedModel?: string;
+  environmentModel?: string;
   manifest?: Pick<RepoManifest, "models">;
   telemetry?: ModelRoutingTelemetry;
   riskLevel?: "low" | "medium" | "high";
@@ -14,7 +15,7 @@ export interface ModelSelectionInput {
 export interface ModelSelection {
   provider: ProviderName;
   model?: string;
-  source: "cli" | "manifest" | "provider-default" | "scored";
+  source: "cli" | "environment" | "manifest" | "provider-default" | "scored";
   scoring?: ModelRoutingDecision;
 }
 
@@ -75,6 +76,15 @@ export function resolveModelSelection(input: ModelSelectionInput): ModelSelectio
       provider: input.requestedProvider ?? "auto",
       model: input.requestedModel,
       source: "cli"
+    };
+  }
+
+  const environmentModel = stringValue(input.environmentModel);
+  if (environmentModel) {
+    return {
+      provider: input.requestedProvider ?? "auto",
+      model: environmentModel,
+      source: "environment"
     };
   }
 

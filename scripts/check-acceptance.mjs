@@ -53,6 +53,7 @@ const summary = {
     status: "unknown",
     verified: false,
     requiredEnv: ["OPENAI_API_KEY"],
+    optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
     message: "Repository doctor did not return live smoke readiness."
   },
   results

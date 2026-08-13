@@ -19,19 +19,25 @@ export function createModelProvider(options: ProviderFactoryOptions = {}): Model
   const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
   const baseUrl = options.baseUrl ?? process.env.OPENAI_BASE_URL;
   const apiProtocol = resolveOpenAIApiProtocol(options.apiProtocol ?? process.env.OPENAI_API_PROTOCOL);
+  const model = normalizedModel(options.model) ?? normalizedModel(process.env.OPENAI_MODEL);
 
   if (requestedProvider === "openai") {
     if (!apiKey) {
       throw new Error("OPENAI_API_KEY is required when --provider openai is selected.");
     }
-    return createOpenAIProvider(apiProtocol, apiKey, options.model, baseUrl);
+    return createOpenAIProvider(apiProtocol, apiKey, model, baseUrl);
   }
 
   if (requestedProvider === "auto" && apiKey) {
-    return createOpenAIProvider(apiProtocol, apiKey, options.model, baseUrl);
+    return createOpenAIProvider(apiProtocol, apiKey, model, baseUrl);
   }
 
   return new StubModelProvider();
+}
+
+function normalizedModel(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized || undefined;
 }
 
 export function resolveOpenAIApiProtocol(value: string | undefined): OpenAIApiProtocol {

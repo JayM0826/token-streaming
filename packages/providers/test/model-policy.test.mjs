@@ -21,6 +21,53 @@ test("resolveModelSelection prefers explicit CLI model override", () => {
   });
 });
 
+test("resolveModelSelection uses environment model before manifest policy", () => {
+  const selection = resolveModelSelection({
+    mode: "auto",
+    requestedProvider: "openai",
+    environmentModel: "relay-model",
+    manifest: {
+      models: {
+        auto_model: "manifest-model"
+      }
+    }
+  });
+
+  assert.deepEqual(selection, {
+    provider: "openai",
+    model: "relay-model",
+    source: "environment"
+  });
+});
+
+test("resolveModelSelection keeps CLI model above environment model", () => {
+  const selection = resolveModelSelection({
+    mode: "auto",
+    requestedProvider: "openai",
+    requestedModel: "cli-model",
+    environmentModel: "relay-model"
+  });
+
+  assert.equal(selection.model, "cli-model");
+  assert.equal(selection.source, "cli");
+});
+
+test("resolveModelSelection ignores whitespace-only environment model", () => {
+  const selection = resolveModelSelection({
+    mode: "auto",
+    requestedProvider: "openai",
+    environmentModel: "   ",
+    manifest: {
+      models: {
+        auto_model: "manifest-model"
+      }
+    }
+  });
+
+  assert.equal(selection.model, "manifest-model");
+  assert.equal(selection.source, "scored");
+});
+
 test("resolveModelSelection uses mode-specific manifest model", () => {
   const selection = resolveModelSelection({
     mode: "max",

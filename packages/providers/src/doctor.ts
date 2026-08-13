@@ -6,6 +6,7 @@ export interface ModelDoctorOptions {
   mode: ProductMode;
   requestedProvider?: ProviderName;
   requestedModel?: string;
+  environmentModel?: string;
   manifest?: Pick<RepoManifest, "models">;
   apiKey?: string;
   baseUrl?: string;
@@ -31,6 +32,7 @@ export async function diagnoseModelProvider(options: ModelDoctorOptions): Promis
     mode: options.mode,
     requestedProvider: options.requestedProvider,
     requestedModel: options.requestedModel,
+    environmentModel: options.environmentModel ?? process.env.OPENAI_MODEL,
     manifest: options.manifest
   });
   const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;

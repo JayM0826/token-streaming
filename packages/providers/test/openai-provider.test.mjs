@@ -76,6 +76,30 @@ test("createModelProvider passes custom OpenAI-compatible base URL from options"
   }
 });
 
+test("createModelProvider accepts OPENAI_MODEL for headless relay clients", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  const originalModel = process.env.OPENAI_MODEL;
+  process.env.OPENAI_MODEL = " relay-model ";
+  globalThis.fetch = async (_url, init) => {
+    calls.push(init);
+    return jsonResponse({ output_text: "ok" });
+  };
+
+  try {
+    const provider = createModelProvider({ provider: "openai", apiKey: "relay-key" });
+    await provider.generate({ mode: "auto", messages: [{ role: "user", content: "hello" }] });
+    assert.equal(JSON.parse(calls[0].body).model, "relay-model");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalModel === undefined) {
+      delete process.env.OPENAI_MODEL;
+    } else {
+      process.env.OPENAI_MODEL = originalModel;
+    }
+  }
+});
+
 test("createModelProvider selects the chat completions relay protocol", async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;

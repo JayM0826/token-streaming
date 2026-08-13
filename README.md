@@ -156,6 +156,7 @@ Provider behavior:
 - `--provider openai` requires `OPENAI_API_KEY`.
 - `OPENAI_BASE_URL` optionally points the OpenAI provider at an OpenAI-compatible relay or gateway.
 - `OPENAI_API_PROTOCOL` selects `responses` (default) or `chat-completions`; the equivalent CLI option is `--api-protocol`.
+- `OPENAI_MODEL` overrides manifest model routing for relay-specific model names; an explicit `--model` still takes precedence.
 - A relay must expose either `<base-url>/responses` or `<base-url>/chat/completions`, matching the selected protocol.
 - `--model` overrides repository model policy.
 - `doctor repo` aggregates repository, manifest, model, git, storage, and tool readiness without running tests or calling a model by default.
@@ -171,7 +172,8 @@ Provider behavior:
 export OPENAI_API_KEY="relay-api-key"
 export OPENAI_BASE_URL="https://relay.example/v1"
 export OPENAI_API_PROTOCOL="responses"
-pnpm cli -- --provider openai --model gpt-5.5 doctor models --probe --json
+export OPENAI_MODEL="relay-model"
+pnpm cli -- --provider openai doctor models --probe --json
 pnpm smoke:openai
 ```
 
@@ -181,7 +183,8 @@ For relays that only implement Chat Completions:
 export OPENAI_API_KEY="relay-api-key"
 export OPENAI_BASE_URL="https://relay.example/v1"
 export OPENAI_API_PROTOCOL="chat-completions"
-pnpm cli -- --provider openai --model relay-model doctor models --probe --json
+export OPENAI_MODEL="relay-model"
+pnpm cli -- --provider openai doctor models --probe --json
 pnpm acceptance:check -- --json
 ```
 - `pnpm acceptance:check -- --json` is the final acceptance gate: offline quality checks plus OpenAI live-smoke verification.

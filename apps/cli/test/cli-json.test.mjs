@@ -910,6 +910,17 @@ test("CLI exposes model doctor warnings as JSON", async () => {
   assert.equal(output.checks.some((check) => check.name === "probe" && check.status === "skipped"), true);
 });
 
+test("CLI model selection accepts OPENAI_MODEL for relay compatibility", async () => {
+  const cwd = await createManifestRepo();
+  const output = runCli(["-C", cwd, "--provider", "openai", "models", "select", "--json"], {
+    OPENAI_MODEL: "relay-model"
+  });
+
+  assert.equal(output.selection.provider, "openai");
+  assert.equal(output.selection.model, "relay-model");
+  assert.equal(output.selection.source, "environment");
+});
+
 test("CLI exposes model doctor errors as JSON with a non-zero exit code", async () => {
   const cwd = await createManifestRepo();
   const result = runCliRaw(["-C", cwd, "--provider", "openai", "doctor", "models", "--json"], { OPENAI_API_KEY: "" });
@@ -941,7 +952,7 @@ test("CLI exposes repository doctor readiness as JSON", async () => {
   assert.equal(output.liveSmoke.status, "missing-api-key");
   assert.equal(output.liveSmoke.verified, false);
   assert.deepEqual(output.liveSmoke.requiredEnv, ["OPENAI_API_KEY"]);
-  assert.deepEqual(output.liveSmoke.optionalEnv, ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"]);
+  assert.deepEqual(output.liveSmoke.optionalEnv, ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"]);
   assert.equal(output.liveSmoke.apiProtocol, "responses");
   assert.equal(output.liveSmoke.endpoint, "https://api.openai.com/v1/responses");
   assert.equal(output.liveSmoke.command, "npx pnpm@9.15.0 smoke:openai");
@@ -1266,7 +1277,7 @@ async function writePatchProposal(filePath, summary, targetPath, content) {
 function runCli(args, env = {}) {
   const stdout = execFileSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, ...env },
+    env: { ...process.env, OPENAI_MODEL: "", ...env },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -1276,7 +1287,7 @@ function runCli(args, env = {}) {
 function runCliJsonLines(args, env = {}) {
   const stdout = execFileSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, ...env },
+    env: { ...process.env, OPENAI_MODEL: "", ...env },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -1289,7 +1300,7 @@ function runCliJsonLines(args, env = {}) {
 function runCliRaw(args, env = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, ...env },
+    env: { ...process.env, OPENAI_MODEL: "", ...env },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });

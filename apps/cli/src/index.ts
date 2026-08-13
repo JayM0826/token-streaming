@@ -150,6 +150,7 @@ interface LiveSmokeReadiness {
   optionalEnv: string[];
   baseUrl: string;
   apiProtocol: OpenAIApiProtocol;
+  model?: string;
   endpoint: string;
   message: string;
   lastProbeStatus?: ModelDoctorResult["checks"][number]["status"];
@@ -332,6 +333,7 @@ async function main(): Promise<void> {
     mode: args.mode,
     requestedProvider: args.provider,
     requestedModel: args.model,
+    environmentModel: process.env.OPENAI_MODEL,
     manifest,
     telemetry: await new TelemetryStore(args.cwd).summarizeModelCalls(),
     task: args.task
@@ -1611,6 +1613,7 @@ async function printConfigInspection(args: ParsedArgs): Promise<void> {
     mode: args.mode,
     requestedProvider: args.provider,
     requestedModel: args.model,
+    environmentModel: process.env.OPENAI_MODEL,
     manifest
   });
   const safety = summarizeSafetyPolicy(manifest.safety);
@@ -2558,6 +2561,7 @@ async function printModelSelection(args: ParsedArgs, manifest: Awaited<ReturnTyp
     mode: args.mode,
     requestedProvider: args.provider,
     requestedModel: args.model,
+    environmentModel: process.env.OPENAI_MODEL,
     manifest,
     telemetry,
     task: args.task
@@ -2626,6 +2630,7 @@ async function printModelDoctor(repoRoot: string, args: ParsedArgs, manifest: Aw
     mode: args.mode,
     requestedProvider: args.provider,
     requestedModel: args.model,
+    environmentModel: process.env.OPENAI_MODEL,
     apiProtocol: args.apiProtocol,
     manifest,
     probe: args.probe
@@ -2667,6 +2672,7 @@ async function printRepoDoctor(args: ParsedArgs, manifest: Awaited<ReturnType<ty
       mode: args.mode,
       requestedProvider: args.provider,
       requestedModel: args.model,
+      environmentModel: process.env.OPENAI_MODEL,
       apiProtocol: args.apiProtocol,
       manifest,
       probe: args.probe
@@ -2803,6 +2809,7 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
   const hasApiKey = Boolean(process.env.OPENAI_API_KEY);
   const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
   const apiProtocol = args.apiProtocol ?? parseApiProtocol(process.env.OPENAI_API_PROTOCOL || "responses");
+  const model = modelDoctor.selection.model;
   const endpoint = `${baseUrl.replace(/\/+$/, "")}/${apiProtocol === "responses" ? "responses" : "chat/completions"}`;
   const verified = Boolean(args.probe && modelDoctor.effectiveProvider === "openai" && probe?.status === "ok");
   const failed = Boolean(args.probe && modelDoctor.effectiveProvider === "openai" && probe?.status === "error");
@@ -2814,9 +2821,10 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
       status: "verified",
       verified: true,
       requiredEnv: ["OPENAI_API_KEY"],
-      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"],
+      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
       baseUrl,
       apiProtocol,
+      model,
       endpoint,
       message: "OpenAI live probe completed successfully.",
       lastProbeStatus: probe?.status
@@ -2830,9 +2838,10 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
       status: "failed",
       verified: false,
       requiredEnv: ["OPENAI_API_KEY"],
-      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"],
+      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
       baseUrl,
       apiProtocol,
+      model,
       endpoint,
       message: probe?.message ?? "OpenAI live probe failed.",
       lastProbeStatus: probe?.status
@@ -2846,9 +2855,10 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
       status: "missing-api-key",
       verified: false,
       requiredEnv: ["OPENAI_API_KEY"],
-      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"],
+      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
       baseUrl,
       apiProtocol,
+      model,
       endpoint,
       message: "OPENAI_API_KEY is not set, so the OpenAI live smoke test cannot run.",
       lastProbeStatus: probe?.status
@@ -2861,9 +2871,10 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
     status: "ready",
     verified: false,
     requiredEnv: ["OPENAI_API_KEY"],
-    optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"],
+    optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
     baseUrl,
     apiProtocol,
+    model,
     endpoint,
     message: `OPENAI_API_KEY is available. Run the smoke command to verify ${endpoint}.`,
     lastProbeStatus: probe?.status
