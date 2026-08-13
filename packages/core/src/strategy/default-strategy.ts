@@ -83,7 +83,7 @@ function createPhases(taskKind: TaskKind, riskLevel: ExecutionPlan["riskLevel"])
   const phases: ExecutionPhase[] = [
     {
       id: "research",
-      role: "research",
+      role: "researcher",
       title: "Research repository context",
       description: "Load explicit metadata first, then inspect source and test boundaries.",
       required: taskKind !== "question"

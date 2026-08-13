@@ -289,6 +289,8 @@ test("CLI records tool runs as session events when requested", async () => {
   assert.equal(typeof output.session.id, "string");
   assert.match(output.session.logPath, /sessions/);
   assert.equal(session.kind, "session");
+  assert.equal(session.events[0].type, "run.started");
+  assert.equal(session.events[0].task, "tools run repo.search");
   assert.equal(session.events.some((event) => event.type === "permission.checked" && event.decision.target === "tool"), true);
   assert.equal(session.events.some((event) => event.type === "tool.started" && event.toolName === "repo.search"), true);
   assert.equal(session.events.some((event) => event.type === "tool.finished" && event.toolName === "repo.search" && event.ok === true), true);
@@ -562,6 +564,7 @@ test("CLI exposes rollback results as JSON", async () => {
 test("CLI exposes run results as JSON", async () => {
   const cwd = await createManifestRepo();
   const output = runCli(["-C", cwd, "--provider", "stub", "--strategy", "default", "--dry-run", "--json", "summarize this repo"]);
+  const checkpoints = runCli(["-C", cwd, "checkpoints", "list", "--json"]);
 
   assert.equal(output.kind, "run");
   assert.equal(output.mode, "auto");
@@ -582,6 +585,7 @@ test("CLI exposes run results as JSON", async () => {
   assert.equal(output.review.recommendation, "Ready for human review.");
   assert.deepEqual(output.context.recentHistory, []);
   assert.match(output.summary, /Stub provider response/);
+  assert.equal(checkpoints.checkpoints.length, 0);
   await assertFileExists(output.eventLogPath);
   await assertFileExists(output.reportPath);
 });
@@ -594,7 +598,7 @@ test("CLI run JSON exposes optional parallel agent runs", async () => {
   assert.equal(output.parallelAgents, true);
   assert.deepEqual(
     output.agentRuns.map((run) => run.role).sort(),
-    ["coder", "research", "reviewer", "tester"]
+    ["coder", "researcher", "reviewer", "tester"]
   );
   assert.equal(output.agentRuns.every((run) => run.ok), true);
   assert.equal(output.modelCalls.filter((call) => call.purpose === "agent").length, 4);
@@ -621,6 +625,7 @@ test("CLI run JSON exposes compact recent history after previous sessions", asyn
 test("CLI exposes session, report, and checkpoint inspection as JSON", async () => {
   const cwd = await createManifestRepo();
   const run = runCli(["-C", cwd, "--provider", "stub", "--dry-run", "--json", "summarize this repo"]);
+  const seededCheckpoint = await new CheckpointStore(cwd).create([]);
 
   const history = runCli(["-C", cwd, "history", "summary", "--json"]);
   const sessions = runCli(["-C", cwd, "sessions", "list", "--json"]);
@@ -650,6 +655,8 @@ test("CLI exposes session, report, and checkpoint inspection as JSON", async () 
   assert.equal(session.summary.sessionId, run.session.id);
   assert.equal(session.summary.status, "completed");
   assert.equal(session.eventCount, session.events.length);
+  assert.equal(session.events[0].type, "run.started");
+  assert.equal(session.events.some((event) => event.type === "context.built"), true);
   assert.equal(session.events.some((event) => event.type === "run.completed"), true);
   assert.equal(sessionStream[0].kind, "session-stream");
   assert.equal(sessionStream[0].phase, "start");
@@ -668,6 +675,7 @@ test("CLI exposes session, report, and checkpoint inspection as JSON", async () 
   assert.match(report.content, /Token Streaming Run/);
   assert.equal(checkpoints.kind, "checkpoints-list");
   assert.equal(checkpoints.checkpoints.length, 1);
+  assert.equal(checkpoints.checkpoints[0].id, seededCheckpoint.id);
   assert.equal(checkpoints.checkpoints[0].fileCount, 0);
   assert.equal(checkpoint.kind, "checkpoint");
   assert.equal(checkpoint.checkpoint.id, checkpoints.checkpoints[0].id);
@@ -694,7 +702,9 @@ test("CLI rejects storage ids that attempt path traversal", async () => {
 test("CLI previews history pruning as JSON without deleting history", async () => {
   const cwd = await createManifestRepo();
   runCli(["-C", cwd, "--provider", "stub", "--dry-run", "--json", "summarize this repo"]);
+  await new CheckpointStore(cwd).create([]);
   runCli(["-C", cwd, "--provider", "stub", "--dry-run", "--json", "summarize this repo again"]);
+  await new CheckpointStore(cwd).create([]);
 
   const preview = runCli(["-C", cwd, "history", "prune", "--dry-run", "--keep", "1", "--json"]);
   const history = runCli(["-C", cwd, "history", "summary", "--json"]);
@@ -714,7 +724,9 @@ test("CLI previews history pruning as JSON without deleting history", async () =
 test("CLI prunes old history files while keeping newest items", async () => {
   const cwd = await createManifestRepo();
   runCli(["-C", cwd, "--provider", "stub", "--dry-run", "--json", "summarize this repo"]);
+  await new CheckpointStore(cwd).create([]);
   runCli(["-C", cwd, "--provider", "stub", "--dry-run", "--json", "summarize this repo again"]);
+  await new CheckpointStore(cwd).create([]);
 
   const pruned = runCli(["-C", cwd, "history", "prune", "--keep", "1", "--json"]);
   const history = runCli(["-C", cwd, "history", "summary", "--json"]);
@@ -983,6 +995,8 @@ test("CLI applies patch proposals and exposes applied files as JSON", async () =
   ]);
   const writtenContent = await readFile(path.join(cwd, "notes", "generated.md"), "utf8");
   const report = await readFile(output.reportPath, "utf8");
+  const session = runCli(["-C", cwd, "sessions", "show", output.session.id, "--json"]);
+  const eventTypes = session.events.map((event) => event.type);
 
   assert.equal(output.kind, "run");
   assert.equal(output.apply, true);
@@ -996,6 +1010,8 @@ test("CLI applies patch proposals and exposes applied files as JSON", async () =
   ]);
   assert.equal(output.verificationResults.length, 0);
   assert.equal(writtenContent, "# Generated\n");
+  assert.equal(eventTypes.indexOf("permission.checked") < eventTypes.indexOf("checkpoint.created"), true);
+  assert.equal(eventTypes.indexOf("checkpoint.created") < eventTypes.indexOf("patch.applied"), true);
   assert.match(report, /## Changes/);
   assert.match(report, /applied files: notes\/generated\.md/);
   assert.match(report, /checkpoint: chk_/);
@@ -1025,8 +1041,11 @@ test("CLI blocks sensitive patch proposals without explicit approval", async () 
   assert.match(failureReport, /Run failed: Patch blocked by approval/);
   const sessions = runCli(["-C", cwd, "sessions", "list", "--json"]);
   const session = runCli(["-C", cwd, "sessions", "show", sessions.sessions[0].sessionId, "--json"]);
+  const checkpoints = runCli(["-C", cwd, "checkpoints", "list", "--json"]);
   assert.equal(error.artifacts.sessionId, sessions.sessions[0].sessionId);
   assert.equal(session.events.some((event) => event.type === "run.failed" && /Patch blocked by approval/.test(event.error)), true);
+  assert.equal(session.events.some((event) => event.type === "checkpoint.created"), false);
+  assert.equal(checkpoints.checkpoints.length, 0);
   await assert.rejects(readFile(path.join(cwd, "secrets", "config.md"), "utf8"), /ENOENT/);
 });
 

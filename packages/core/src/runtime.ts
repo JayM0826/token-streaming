@@ -132,6 +132,17 @@ export class TokenStreamingRuntime {
 
     await eventLog.append(
       this.sessionManager.createEvent({
+        type: "run.started",
+        sessionId: session.id,
+        task: options.task,
+        repoRoot: session.repoRoot,
+        mode: session.mode,
+        strategy: session.strategy
+      })
+    );
+
+    await eventLog.append(
+      this.sessionManager.createEvent({
         type: "user.message",
         sessionId: session.id,
         message: options.task
@@ -283,19 +294,6 @@ export class TokenStreamingRuntime {
         approvalResponses,
         appliedFiles
       });
-
-      if (!checkpointId) {
-        const checkpoint = await checkpointStore.create([]);
-        checkpointId = checkpoint.id;
-        await eventLog.append(
-          this.sessionManager.createEvent({
-            type: "checkpoint.created",
-            sessionId: session.id,
-            checkpointId,
-            files: []
-          })
-        );
-      }
 
       const shouldSkipTests = options.dryRun || (patchProposal !== undefined && !options.apply);
       verificationResults.push(
@@ -514,6 +512,17 @@ export class TokenStreamingRuntime {
 
     const recentHistory = await this.loadRecentHistoryContext(session.id);
     const context = await buildRuntimeContext(task, repo, manifest, plan, { recentHistory });
+    await eventLog.append(
+      this.sessionManager.createEvent({
+        type: "context.built",
+        sessionId: session.id,
+        relevantModules: context.relevantModules,
+        relevantWorkflows: context.relevantWorkflows,
+        sourceFiles: context.sourceSnippets.map((snippet) => snippet.path),
+        testCommands: context.testCommands,
+        recentHistoryCount: context.recentHistory.length
+      })
+    );
     return { repo, manifest, plan, context };
   }
 
@@ -759,6 +768,60 @@ export class TokenStreamingRuntime {
       })
     );
 
+    if (!input.apply) {
+      return undefined;
+    }
+
+    const decision = evaluatePatchPolicy(input.manifest, input.proposal, { allowSensitive: input.allowSensitive });
+    input.permissionDecisions.push(decision);
+    await input.eventLog.append(
+      this.sessionManager.createEvent({
+        type: "permission.checked",
+        sessionId: input.session.id,
+        decision
+      })
+    );
+
+    if (!decision.allowed) {
+      if (!decision.requiresApproval) {
+        const error = `Patch blocked by policy: ${decision.reasons.join("; ")}`;
+        await this.appendRunFailed(input.eventLog, input.session.id, error);
+        throw new Error(error);
+      }
+
+      const approvalRequest = {
+        id: createId("apr"),
+        target: decision.target,
+        action: decision.action,
+        severity: decision.severity,
+        reasons: decision.reasons
+      };
+
+      await input.eventLog.append(
+        this.sessionManager.createEvent({
+          type: "approval.requested",
+          sessionId: input.session.id,
+          request: approvalRequest
+        })
+      );
+
+      const approvalResponse = await this.approvalHost.requestApproval(approvalRequest);
+      input.approvalResponses.push(approvalResponse);
+      await input.eventLog.append(
+        this.sessionManager.createEvent({
+          type: "approval.resolved",
+          sessionId: input.session.id,
+          response: approvalResponse
+        })
+      );
+
+      if (!approvalResponse.approved) {
+        const error = `Patch blocked by approval: ${approvalResponse.reason ?? decision.reasons.join("; ")}`;
+        await this.appendRunFailed(input.eventLog, input.session.id, error);
+        throw new Error(error);
+      }
+    }
+
     const checkpoint = await input.checkpointStore.create(input.proposal.files.map((file) => file.path));
     await input.eventLog.append(
       this.sessionManager.createEvent({
@@ -769,68 +832,16 @@ export class TokenStreamingRuntime {
       })
     );
 
-    if (input.apply) {
-      const decision = evaluatePatchPolicy(input.manifest, input.proposal, { allowSensitive: input.allowSensitive });
-      input.permissionDecisions.push(decision);
-      await input.eventLog.append(
-        this.sessionManager.createEvent({
-          type: "permission.checked",
-          sessionId: input.session.id,
-          decision
-        })
-      );
-
-      if (!decision.allowed) {
-        if (!decision.requiresApproval) {
-          const error = `Patch blocked by policy: ${decision.reasons.join("; ")}`;
-          await this.appendRunFailed(input.eventLog, input.session.id, error);
-          throw new Error(error);
-        }
-
-        const approvalRequest = {
-          id: createId("apr"),
-          target: decision.target,
-          action: decision.action,
-          severity: decision.severity,
-          reasons: decision.reasons
-        };
-
-        await input.eventLog.append(
-          this.sessionManager.createEvent({
-            type: "approval.requested",
-            sessionId: input.session.id,
-            request: approvalRequest
-          })
-        );
-
-        const approvalResponse = await this.approvalHost.requestApproval(approvalRequest);
-        input.approvalResponses.push(approvalResponse);
-        await input.eventLog.append(
-          this.sessionManager.createEvent({
-            type: "approval.resolved",
-            sessionId: input.session.id,
-            response: approvalResponse
-          })
-        );
-
-        if (!approvalResponse.approved) {
-          const error = `Patch blocked by approval: ${approvalResponse.reason ?? decision.reasons.join("; ")}`;
-          await this.appendRunFailed(input.eventLog, input.session.id, error);
-          throw new Error(error);
-        }
-      }
-
-      const patchResult = await applyFilePatches(this.repoRoot, input.proposal.files);
-      input.appliedFiles.push(...patchResult.files);
-      await input.eventLog.append(
-        this.sessionManager.createEvent({
-          type: "patch.applied",
-          sessionId: input.session.id,
-          files: patchResult.files,
-          checkpointId: checkpoint.id
-        })
-      );
-    }
+    const patchResult = await applyFilePatches(this.repoRoot, input.proposal.files);
+    input.appliedFiles.push(...patchResult.files);
+    await input.eventLog.append(
+      this.sessionManager.createEvent({
+        type: "patch.applied",
+        sessionId: input.session.id,
+        files: patchResult.files,
+        checkpointId: checkpoint.id
+      })
+    );
 
     return checkpoint.id;
   }
@@ -1043,7 +1054,7 @@ function buildAgentSystemPrompt(role: AgentRole): string {
     "You produce advisory artifacts only. Do not claim that files were changed or commands were run.",
     "Keep the output concise, structured, and useful to the orchestrator."
   ];
-  if (role === "research") {
+  if (role === "researcher") {
     base.push("Focus on repository context, module/workflow boundaries, and missing information.");
   } else if (role === "coder") {
     base.push("Focus on implementation approach, files likely to change, and patch risks.");

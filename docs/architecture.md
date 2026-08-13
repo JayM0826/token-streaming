@@ -64,7 +64,8 @@ Model or file-sourced changes must enter the runtime as a structured patch propo
 - Malformed structured proposals are recorded as `run.failed` and receive a failure report instead of disappearing as parser errors.
 - Proposals are preview-only by default.
 - `--apply` is required before the patch engine writes files.
-- A checkpoint is created before applying proposed files.
+- Preview-only and rejected proposals do not create checkpoints.
+- Applied proposals pass permission and approval checks before a checkpoint is created immediately ahead of the write.
 - Event logs record `patch.proposed`, `checkpoint.created`, and `patch.applied`.
 - `--repair` allows one additional patch proposal after failed verification.
 
@@ -108,7 +109,7 @@ The tools package exposes a stable catalog before exposing arbitrary tool execut
 - `tools run <name> <json-input>` executes only read-only catalog tools.
 - `tools run <name> --json <json-input>` returns a structured `tool-run` envelope.
 - `tools run <name> --input-file <path>` loads structured input from disk for shell-safe host integration.
-- `tools run <name> --record --json` creates a session event log for ad-hoc tool calls, including `tool.started`, `tool.finished`, and `run.completed`.
+- `tools run <name> --record --json` creates a session event log for ad-hoc tool calls, including `run.started`, `tool.started`, `tool.finished`, and `run.completed`.
 - Recorded tool policy and execution failures write `run.failed`, create a compact report, and surface the matching session/report artifacts through the JSON error envelope.
 - Every `tools run` response includes a tool policy decision; recorded runs persist that decision as `permission.checked`.
 - `test.run` is the only execute-risk tool exposed through `tools run`, and only when the requested command is explicitly declared in `.ai/tests.yaml`, `module.yaml`, or `flow.yaml` and passes forbidden command policy.
@@ -151,12 +152,12 @@ These commands are intentionally implemented through storage APIs so a future de
 V1 represents multi-agent collaboration as role phases plus handoff artifacts, not as always-on worker swarms.
 
 - `orchestrator` produces the execution plan.
-- `research` produces a repository context brief.
+- `researcher` produces a repository context brief.
 - `coder` produces a structured patch proposal for change tasks.
 - `tester` produces verification results.
 - `reviewer` produces risk and diff review for change or high-risk tasks.
 
-Each execution plan records handoffs such as `research -> coder: repository context brief`, making collaboration visible in reports today and reusable by future multi-worker strategies. Runtime runs also persist a `review.completed` event with risk, verification status, repository-change status, findings, and recommendation so the reviewer phase is visible in event replay and future host UIs.
+Each execution plan records handoffs such as `researcher -> coder: repository context brief`, making collaboration visible in reports today and reusable by future multi-worker strategies. Every runtime task begins with a structured `run.started` event and records `context.built` after context selection, including selected module, workflow, source-file, test-command, and recent-history counts for future host timelines. Runtime runs also persist a `review.completed` event with risk, verification status, repository-change status, findings, and recommendation so the reviewer phase is visible in event replay and future host UIs.
 
 `--parallel-agents` optionally activates non-orchestrator phases as concurrent role agents before the main planning call. These agents produce advisory artifacts only: they do not apply patches, run shell commands, or bypass permission checks. The runtime records `agent.started` and `agent.finished` events, records each sub-agent model call with purpose `agent`, includes the artifacts in the run report, and appends them to the final orchestrator prompt. The default remains disabled to protect everyday cost and latency.
 

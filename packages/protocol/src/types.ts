@@ -1,6 +1,6 @@
 export type ProductMode = "economy" | "max" | "auto";
 
-export type AgentRole = "orchestrator" | "research" | "coder" | "tester" | "reviewer";
+export type AgentRole = "orchestrator" | "researcher" | "coder" | "tester" | "reviewer";
 
 export type StrategyId = "default" | (string & {});
 
@@ -13,9 +13,11 @@ export interface Session {
 }
 
 export type SessionEvent =
+  | RunStartedEvent
   | UserMessageEvent
   | RepoScannedEvent
   | ManifestLoadedEvent
+  | ContextBuiltEvent
   | PlanCreatedEvent
   | AgentStartedEvent
   | AgentFinishedEvent
@@ -40,6 +42,14 @@ export interface BaseEvent {
   type: string;
 }
 
+export interface RunStartedEvent extends BaseEvent {
+  type: "run.started";
+  task: string;
+  repoRoot: string;
+  mode: ProductMode;
+  strategy: StrategyId;
+}
+
 export interface UserMessageEvent extends BaseEvent {
   type: "user.message";
   message: string;
@@ -53,6 +63,15 @@ export interface RepoScannedEvent extends BaseEvent {
 export interface ManifestLoadedEvent extends BaseEvent {
   type: "manifest.loaded";
   manifest: LoadedManifestSummary;
+}
+
+export interface ContextBuiltEvent extends BaseEvent {
+  type: "context.built";
+  relevantModules: string[];
+  relevantWorkflows: string[];
+  sourceFiles: string[];
+  testCommands: string[];
+  recentHistoryCount: number;
 }
 
 export interface PlanCreatedEvent extends BaseEvent {

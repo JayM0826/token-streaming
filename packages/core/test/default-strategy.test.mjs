@@ -12,8 +12,8 @@ test("DefaultStrategy creates handoffs for understanding tasks", async () => {
   assert.deepEqual(
     plan.handoffs.map((handoff) => [handoff.from, handoff.to ?? "final", handoff.artifact]),
     [
-      ["orchestrator", "research", "execution plan"],
-      ["research", "final", "repository context brief"]
+      ["orchestrator", "researcher", "execution plan"],
+      ["researcher", "final", "repository context brief"]
     ]
   );
 });
@@ -28,8 +28,8 @@ test("DefaultStrategy creates coder, tester, and reviewer handoffs for change ta
   assert.deepEqual(
     plan.handoffs.map((handoff) => [handoff.from, handoff.to ?? "final", handoff.artifact]),
     [
-      ["orchestrator", "research", "execution plan"],
-      ["research", "coder", "repository context brief"],
+      ["orchestrator", "researcher", "execution plan"],
+      ["researcher", "coder", "repository context brief"],
       ["coder", "tester", "structured patch proposal"],
       ["tester", "reviewer", "verification result"],
       ["reviewer", "final", "risk and diff review"]

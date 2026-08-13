@@ -126,6 +126,37 @@ test("TokenStreamingRuntime records planning model calls in result, event log, a
   }
 });
 
+test("TokenStreamingRuntime records run start and built context lifecycle events", async () => {
+  const repoRoot = await createRepo();
+  try {
+    const result = await new TokenStreamingRuntime({ repoRoot, modelProvider: new RecordingProvider() }).runTask({
+      task: "summarize lifecycle events",
+      dryRun: true
+    });
+    const events = (await readFile(result.eventLogPath, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    const eventTypes = events.map((event) => event.type);
+    const started = events.find((event) => event.type === "run.started");
+    const contextBuilt = events.find((event) => event.type === "context.built");
+
+    assert.equal(eventTypes[0], "run.started");
+    assert.equal(started.task, "summarize lifecycle events");
+    assert.equal(started.repoRoot, repoRoot);
+    assert.equal(started.mode, "auto");
+    assert.equal(started.strategy, "default");
+    assert.equal(eventTypes.indexOf("context.built") > eventTypes.indexOf("plan.created"), true);
+    assert.deepEqual(contextBuilt.relevantModules, result.context.relevantModules);
+    assert.deepEqual(contextBuilt.relevantWorkflows, result.context.relevantWorkflows);
+    assert.deepEqual(contextBuilt.sourceFiles, result.context.sourceSnippets.map((snippet) => snippet.path));
+    assert.deepEqual(contextBuilt.testCommands, result.context.testCommands);
+    assert.equal(contextBuilt.recentHistoryCount, result.context.recentHistory.length);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("TokenStreamingRuntime can run optional parallel role agents before planning", async () => {
   const repoRoot = await createRepo();
   try {
@@ -142,7 +173,7 @@ test("TokenStreamingRuntime can run optional parallel role agents before plannin
 
     assert.deepEqual(
       result.agentRuns.map((run) => run.role).sort(),
-      ["coder", "research", "reviewer", "tester"]
+      ["coder", "researcher", "reviewer", "tester"]
     );
     assert.equal(result.agentRuns.every((run) => run.ok), true);
     assert.equal(result.modelCalls.filter((call) => call.purpose === "agent").length, 4);
@@ -152,7 +183,7 @@ test("TokenStreamingRuntime can run optional parallel role agents before plannin
     assert.match(provider.requests.at(-1)?.messages.at(-1)?.content, /## Parallel Agent Artifacts/);
     assert.match(result.summary, /Parallel agent artifacts: 4/);
     assert.match(report, /## Agent Runs/);
-    assert.match(report, /research\/research: ok/);
+    assert.match(report, /researcher\/research: ok/);
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
   }
@@ -234,6 +265,7 @@ test("TokenStreamingRuntime records a report when initialization fails", async (
 
     const eventLog = await readFile(path.join(repoRoot, ".token-streaming", "sessions", sessionFiles[0]), "utf8");
     const report = await readFile(path.join(repoRoot, ".token-streaming", "reports", reportFiles[0]), "utf8");
+    assert.equal(JSON.parse(eventLog.split(/\r?\n/).find(Boolean)).type, "run.started");
     assert.match(eventLog, /"type":"run.failed"/);
     assert.match(eventLog, /Run failed during initialization: strategy initialization exploded/);
     assert.match(eventLog, /"type":"review.completed"/);
@@ -343,7 +375,7 @@ test("TokenStreamingRuntime previews default orchestration without calling a mod
     );
     assert.deepEqual(preview.plan.testCommands, ["npm run test", "npm run typecheck"]);
     assert.match(preview.context.overview, /Handoffs:/);
-    assert.match(preview.context.overview, /orchestrator -> research: execution plan/);
+    assert.match(preview.context.overview, /orchestrator -> researcher: execution plan/);
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
   }

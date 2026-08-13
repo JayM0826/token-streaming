@@ -1685,6 +1685,16 @@ async function printToolRun(args: ParsedArgs): Promise<void> {
   if (session && sessionManager && eventLog) {
     await eventLog.append(
       sessionManager.createEvent({
+        type: "run.started",
+        sessionId: session.id,
+        task: `tools run ${toolName}`,
+        repoRoot: session.repoRoot,
+        mode: session.mode,
+        strategy: session.strategy
+      })
+    );
+    await eventLog.append(
+      sessionManager.createEvent({
         type: "user.message",
         sessionId: session.id,
         message: `tools run ${toolName}`
@@ -2948,6 +2958,9 @@ function formatCheckpoint(checkpoint: Checkpoint): string {
 
 function formatEvent(event: SessionEvent): string {
   const prefix = `${event.timestamp}  ${event.type}`;
+  if (event.type === "run.started") {
+    return `${prefix}  mode=${event.mode} strategy=${event.strategy} task=${shorten(event.task, 100)}`;
+  }
   if (event.type === "user.message") {
     return `${prefix}  ${shorten(event.message, 120)}`;
   }
@@ -2958,6 +2971,9 @@ function formatEvent(event: SessionEvent): string {
   }
   if (event.type === "manifest.loaded") {
     return `${prefix}  modules=${event.manifest.moduleCount} workflows=${event.manifest.workflowCount} generated=${event.manifest.generated}`;
+  }
+  if (event.type === "context.built") {
+    return `${prefix}  modules=${event.relevantModules.length} workflows=${event.relevantWorkflows.length} sources=${event.sourceFiles.length} tests=${event.testCommands.length} history=${event.recentHistoryCount}`;
   }
   if (event.type === "patch.proposed") {
     return `${prefix}  files=${event.files.join(", ") || "none"}`;

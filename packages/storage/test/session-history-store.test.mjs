@@ -79,6 +79,39 @@ test("SessionHistoryStore summarizes failed sessions", async () => {
   }
 });
 
+test("SessionHistoryStore prefers structured run start metadata", async () => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-history-"));
+  try {
+    const sessionId = "ses_started";
+    const log = new EventLog(repoRoot, sessionId);
+
+    await log.append({
+      id: "evt_1",
+      sessionId,
+      timestamp: "2026-06-20T00:00:00.000Z",
+      type: "run.started",
+      task: "structured task",
+      repoRoot,
+      mode: "auto",
+      strategy: "default"
+    });
+    await log.append({
+      id: "evt_2",
+      sessionId,
+      timestamp: "2026-06-20T00:00:01.000Z",
+      type: "user.message",
+      message: "legacy task"
+    });
+
+    const [summary] = await new SessionHistoryStore(repoRoot).list();
+
+    assert.equal(summary.task, "structured task");
+    assert.equal(summary.startedAt, "2026-06-20T00:00:00.000Z");
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("SessionHistoryStore returns an empty list when no sessions exist", async () => {
   const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-history-"));
   try {

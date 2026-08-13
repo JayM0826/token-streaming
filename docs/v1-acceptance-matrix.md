@@ -20,13 +20,14 @@ Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after
 | Foreign-repo fallback generator | Complete | `packages/ai-manifest/src/generator.ts`; JS and Python inference tests |
 | Context Builder | Complete | metadata-first context, reasons, source snippets, recent history tests |
 | Default Strategy | Complete | strategy phases, roles, handoffs, risk and targeted-test tests |
+| Agent role phases | Complete | `orchestrator`, `researcher`, `coder`, `tester`, `reviewer` contracts; handoff and advisory parallel-agent tests |
 | Tool Runtime | Complete | typed catalog and controlled executor tests |
 | Permission System | Complete | patch, command, tool and approval-host tests |
 | Patch Engine | Complete | structured proposal parser, repo and symlink boundary tests |
 | Command Runner | Complete | bounded shell runner used through policy-checked verification |
 | Test Feedback | Complete | pass, fail-fast, policy and approval tests |
 | Checkpoint / Rollback | Complete | pre-write snapshots, previews, rollback and tamper-boundary tests |
-| Event Log | Complete | append-only JSONL sessions and event-surface tests |
+| Event Log | Complete | append-only JSONL sessions, explicit `run.started` / `context.built` lifecycle events, and event-surface tests |
 | Run Report | Complete | success, runtime failure and initialization failure report tests |
 | Model Provider interface | Complete | protocol contract in `@token-streaming/protocol` |
 | Stub provider | Complete | deterministic offline runtime and CLI tests |

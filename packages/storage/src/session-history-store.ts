@@ -68,6 +68,7 @@ export class SessionHistoryStore {
 function summarizeSession(sessionId: string, logPath: string, events: SessionEvent[]): SessionHistorySummary {
   const firstEvent = events[0];
   const lastEvent = events.at(-1);
+  const started = events.find((event) => event.type === "run.started");
   const userMessage = events.find((event) => event.type === "user.message");
   const completed = [...events].reverse().find((event) => event.type === "run.completed");
   const failed = [...events].reverse().find((event) => event.type === "run.failed");
@@ -82,7 +83,7 @@ function summarizeSession(sessionId: string, logPath: string, events: SessionEve
     completedAt: completed?.timestamp,
     failedAt: failed?.timestamp,
     lastEventAt: lastEvent?.timestamp,
-    task: userMessage?.type === "user.message" ? userMessage.message : undefined,
+    task: started?.type === "run.started" ? started.task : userMessage?.type === "user.message" ? userMessage.message : undefined,
     summary: completed?.type === "run.completed" ? firstLine(completed.summary) : undefined,
     error: failed?.type === "run.failed" ? firstLine(failed.error) : undefined,
     logPath

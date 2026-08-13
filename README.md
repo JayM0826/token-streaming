@@ -8,7 +8,7 @@ The first implementation focuses on one real orchestration strategy: `default`.
 
 - Keep the runtime headless and reusable.
 - Treat `.ai/`, `module.yaml`, and `flow.yaml` as first-class repository context.
-- Use event-sourced sessions so every run can be inspected and replayed.
+- Use event-sourced sessions so every run can be inspected and replayed, including explicit `run.started` and `context.built` lifecycle records.
 - Apply edits through a patch/checkpoint boundary.
 - Leave room for future strategies and product modes without implementing them all up front.
 
@@ -209,6 +209,7 @@ Manifest behavior:
 - `tools run <name> --json <json-input>` returns a structured `tool-run` envelope with the tool policy decision for agent planners and future hosts.
 - `tools run <name> --input-file tool-input.json` avoids shell quoting issues for structured tool input.
 - `tools run <name> --record --json` creates a local session event log with `tool.started`, `tool.finished`, and `run.completed` events.
+- Recorded tool sessions begin with `run.started`, matching full runtime session timelines.
 - Recorded tool policy and execution failures also write `run.failed` and a report, and their JSON error envelope includes artifact links.
 - Recorded tool runs also write `permission.checked` so tool risk is auditable in the same event stream as patch and command policy decisions.
 - `tools run test.run --json '{"command":"..."}'` is allowed only for commands declared in `.ai/tests.yaml`, `module.yaml`, or `flow.yaml`, and still goes through forbidden command policy.
@@ -270,6 +271,7 @@ Session and checkpoint commands make the local agent loop inspectable:
 ## Patch Proposal Format
 
 Patch proposals are structured JSON. They are preview-only unless `--apply` is passed.
+Preview-only proposals do not create rollback points. Applied proposals pass permission checks first, then create a checkpoint immediately before the patch engine writes files.
 
 ```json
 {
