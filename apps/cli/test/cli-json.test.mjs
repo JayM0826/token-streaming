@@ -952,7 +952,8 @@ test("CLI exposes repository doctor readiness as JSON", async () => {
   assert.equal(output.liveSmoke.status, "missing-api-key");
   assert.equal(output.liveSmoke.verified, false);
   assert.deepEqual(output.liveSmoke.requiredEnv, ["OPENAI_API_KEY"]);
-  assert.deepEqual(output.liveSmoke.optionalEnv, ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"]);
+  assert.deepEqual(output.liveSmoke.optionalEnv, ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"]);
+  assert.equal(output.liveSmoke.timeoutMs, 30_000);
   assert.equal(output.liveSmoke.apiProtocol, "responses");
   assert.equal(output.liveSmoke.endpoint, "https://api.openai.com/v1/responses");
   assert.equal(output.liveSmoke.command, "npx pnpm@9.15.0 smoke:openai");
@@ -1277,7 +1278,7 @@ async function writePatchProposal(filePath, summary, targetPath, content) {
 function runCli(args, env = {}) {
   const stdout = execFileSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, OPENAI_MODEL: "", ...env },
+    env: { ...process.env, OPENAI_MODEL: "", OPENAI_TIMEOUT_MS: "", ...env },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -1287,7 +1288,7 @@ function runCli(args, env = {}) {
 function runCliJsonLines(args, env = {}) {
   const stdout = execFileSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, OPENAI_MODEL: "", ...env },
+    env: { ...process.env, OPENAI_MODEL: "", OPENAI_TIMEOUT_MS: "", ...env },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -1300,7 +1301,7 @@ function runCliJsonLines(args, env = {}) {
 function runCliRaw(args, env = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, OPENAI_MODEL: "", ...env },
+    env: { ...process.env, OPENAI_MODEL: "", OPENAI_TIMEOUT_MS: "", ...env },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });

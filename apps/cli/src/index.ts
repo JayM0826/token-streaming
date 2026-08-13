@@ -151,6 +151,7 @@ interface LiveSmokeReadiness {
   baseUrl: string;
   apiProtocol: OpenAIApiProtocol;
   model?: string;
+  timeoutMs: number;
   endpoint: string;
   message: string;
   lastProbeStatus?: ModelDoctorResult["checks"][number]["status"];
@@ -2821,10 +2822,11 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
       status: "verified",
       verified: true,
       requiredEnv: ["OPENAI_API_KEY"],
-      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
+      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"],
       baseUrl,
       apiProtocol,
       model,
+      timeoutMs: modelDoctor.requestTimeoutMs,
       endpoint,
       message: "OpenAI live probe completed successfully.",
       lastProbeStatus: probe?.status
@@ -2838,10 +2840,11 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
       status: "failed",
       verified: false,
       requiredEnv: ["OPENAI_API_KEY"],
-      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
+      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"],
       baseUrl,
       apiProtocol,
       model,
+      timeoutMs: modelDoctor.requestTimeoutMs,
       endpoint,
       message: probe?.message ?? "OpenAI live probe failed.",
       lastProbeStatus: probe?.status
@@ -2855,10 +2858,11 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
       status: "missing-api-key",
       verified: false,
       requiredEnv: ["OPENAI_API_KEY"],
-      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
+      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"],
       baseUrl,
       apiProtocol,
       model,
+      timeoutMs: modelDoctor.requestTimeoutMs,
       endpoint,
       message: "OPENAI_API_KEY is not set, so the OpenAI live smoke test cannot run.",
       lastProbeStatus: probe?.status
@@ -2871,10 +2875,11 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
     status: "ready",
     verified: false,
     requiredEnv: ["OPENAI_API_KEY"],
-    optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
+    optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"],
     baseUrl,
     apiProtocol,
     model,
+    timeoutMs: modelDoctor.requestTimeoutMs,
     endpoint,
     message: `OPENAI_API_KEY is available. Run the smoke command to verify ${endpoint}.`,
     lastProbeStatus: probe?.status

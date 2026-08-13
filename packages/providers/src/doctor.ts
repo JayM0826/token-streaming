@@ -1,5 +1,11 @@
 import type { ProductMode, RepoManifest } from "@token-streaming/protocol";
-import { createModelProvider, resolveOpenAIApiProtocol, type OpenAIApiProtocol, type ProviderName } from "./factory.js";
+import {
+  createModelProvider,
+  resolveOpenAIApiProtocol,
+  resolveOpenAITimeoutMs,
+  type OpenAIApiProtocol,
+  type ProviderName
+} from "./factory.js";
 import { resolveModelSelection, type ModelSelection } from "./model-policy.js";
 
 export interface ModelDoctorOptions {
@@ -11,6 +17,7 @@ export interface ModelDoctorOptions {
   apiKey?: string;
   baseUrl?: string;
   apiProtocol?: OpenAIApiProtocol;
+  timeoutMs?: number;
   probe?: boolean;
 }
 
@@ -18,6 +25,7 @@ export interface ModelDoctorResult {
   ok: boolean;
   selection: ModelSelection;
   effectiveProvider: "stub" | "openai";
+  requestTimeoutMs: number;
   checks: ModelDoctorCheck[];
 }
 
@@ -38,6 +46,7 @@ export async function diagnoseModelProvider(options: ModelDoctorOptions): Promis
   const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
   const baseUrl = options.baseUrl ?? process.env.OPENAI_BASE_URL;
   const apiProtocol = resolveOpenAIApiProtocol(options.apiProtocol ?? process.env.OPENAI_API_PROTOCOL);
+  const requestTimeoutMs = resolveOpenAITimeoutMs(options.timeoutMs);
   const checks: ModelDoctorCheck[] = [];
   const effectiveProvider = resolveEffectiveProvider(selection.provider, apiKey);
 
@@ -75,10 +84,15 @@ export async function diagnoseModelProvider(options: ModelDoctorOptions): Promis
       status: "ok",
       message: `Using ${apiProtocol} endpoint at ${formatEndpoint(baseUrl, apiProtocol)}.`
     });
+    checks.push({
+      name: "openai-timeout",
+      status: "ok",
+      message: `OpenAI-compatible requests time out after ${requestTimeoutMs}ms.`
+    });
   }
 
   if (options.probe) {
-    checks.push(await runProbe(selection, apiKey, baseUrl, apiProtocol));
+    checks.push(await runProbe(selection, apiKey, baseUrl, apiProtocol, requestTimeoutMs));
   } else {
     checks.push({
       name: "probe",
@@ -91,6 +105,7 @@ export async function diagnoseModelProvider(options: ModelDoctorOptions): Promis
     ok: checks.every((check) => check.status !== "error"),
     selection,
     effectiveProvider,
+    requestTimeoutMs,
     checks
   };
 }
@@ -99,7 +114,8 @@ async function runProbe(
   selection: ModelSelection,
   apiKey: string | undefined,
   baseUrl: string | undefined,
-  apiProtocol: OpenAIApiProtocol
+  apiProtocol: OpenAIApiProtocol,
+  timeoutMs: number
 ): Promise<ModelDoctorCheck> {
   try {
     const provider = createModelProvider({
@@ -107,7 +123,8 @@ async function runProbe(
       model: selection.model,
       apiKey,
       baseUrl,
-      apiProtocol
+      apiProtocol,
+      timeoutMs
     });
     const response = await provider.generate({
       mode: "auto",

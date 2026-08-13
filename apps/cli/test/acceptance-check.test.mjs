@@ -13,7 +13,8 @@ test("acceptance check reports missing OpenAI live smoke as incomplete", () => {
     env: {
       ...process.env,
       OPENAI_API_KEY: "",
-      OPENAI_MODEL: ""
+      OPENAI_MODEL: "",
+      OPENAI_TIMEOUT_MS: ""
     },
     encoding: "utf8"
   });
@@ -45,7 +46,8 @@ test("acceptance check verifies Responses and Chat Completions provider probes",
           OPENAI_API_KEY: "relay-key",
           OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
           OPENAI_API_PROTOCOL: protocol,
-          OPENAI_MODEL: "relay-model"
+          OPENAI_MODEL: "relay-model",
+          OPENAI_TIMEOUT_MS: ""
         },
         encoding: "utf8"
       });
@@ -58,9 +60,40 @@ test("acceptance check verifies Responses and Chat Completions provider probes",
       assert.equal(output.liveSmoke.verified, true);
       assert.equal(output.liveSmoke.apiProtocol, protocol);
       assert.equal(output.liveSmoke.model, "relay-model");
+      assert.equal(output.liveSmoke.timeoutMs, 30_000);
       assert.equal(output.liveSmoke.endpoint, `http://127.0.0.1:${port}/v1/${endpoint}`);
-      assert.match(output.results.find((step) => step.name === "repository-doctor")?.command ?? "", /--probe/);
+      assert.doesNotMatch(output.results.find((step) => step.name === "repository-doctor")?.command ?? "", /--probe/);
+      assert.match(output.results.find((step) => step.name === "live-smoke")?.command ?? "", /--probe/);
     }
+  } finally {
+    relay.kill();
+  }
+});
+
+test("acceptance check keeps offline gates green when the live provider fails", async () => {
+  const relay = spawn(process.execPath, [relayFixture], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    const port = await readFirstLine(relay);
+    const result = spawnSync(process.execPath, [acceptanceScript, "--quick", "--json"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        OPENAI_API_KEY: "relay-key",
+        OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
+        OPENAI_API_PROTOCOL: "responses",
+        OPENAI_MODEL: "failing-model",
+        OPENAI_TIMEOUT_MS: ""
+      },
+      encoding: "utf8"
+    });
+    const output = JSON.parse(result.stdout);
+
+    assert.equal(result.status, 1);
+    assert.equal(output.ok, false);
+    assert.equal(output.offlineOk, true);
+    assert.equal(output.liveSmoke.status, "failed");
+    assert.equal(output.results.find((step) => step.name === "repository-doctor")?.ok, true);
+    assert.equal(output.results.find((step) => step.name === "live-smoke")?.ok, false);
   } finally {
     relay.kill();
   }

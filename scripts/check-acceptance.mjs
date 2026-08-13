@@ -3,11 +3,8 @@ import { spawnSync } from "node:child_process";
 
 const quick = process.argv.includes("--quick");
 const json = process.argv.includes("--json");
-const repositoryDoctorArgs = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo"];
-if (process.env.OPENAI_API_KEY) {
-  repositoryDoctorArgs.push("--provider", "openai", "--probe");
-}
-repositoryDoctorArgs.push("--json");
+const offlineEnvironment = withoutOpenAIEnvironment(process.env);
+const repositoryDoctorArgs = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--json"];
 
 const steps = [
   ...(quick
@@ -26,7 +23,7 @@ const results = [];
 let liveSmoke;
 
 for (const [name, command] of steps) {
-  const result = run(command);
+  const result = run(command, offlineEnvironment);
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
   const parsed = parseJson(result.stdout);
   if (name === "repository-doctor") {
@@ -41,7 +38,22 @@ for (const [name, command] of steps) {
   });
 }
 
-const offlineOk = results.every((result) => result.ok);
+if (process.env.OPENAI_API_KEY) {
+  const command = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--provider", "openai", "--probe", "--json"];
+  const result = run(command, process.env);
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
+  const parsed = parseJson(result.stdout);
+  liveSmoke = parsed?.liveSmoke;
+  results.push({
+    name: "live-smoke",
+    command: command.join(" "),
+    ok: result.status === 0,
+    exitCode: result.status,
+    outputSummary: summarize(output)
+  });
+}
+
+const offlineOk = results.filter((result) => result.name !== "live-smoke").every((result) => result.ok);
 const liveSmokeVerified = liveSmoke?.verified === true;
 const summary = {
   kind: "acceptance-check",
@@ -53,7 +65,7 @@ const summary = {
     status: "unknown",
     verified: false,
     requiredEnv: ["OPENAI_API_KEY"],
-    optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL"],
+    optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"],
     message: "Repository doctor did not return live smoke readiness."
   },
   results
@@ -67,13 +79,13 @@ if (json) {
 
 process.exitCode = summary.ok ? 0 : 1;
 
-function run(command) {
+function run(command, environment) {
   const [rawProgram, ...args] = command;
   const program = process.platform === "win32" && rawProgram === "npx" ? "npx.cmd" : rawProgram;
   const useShell = process.platform === "win32" && rawProgram === "npx";
   const result = spawnSync(program, args, {
     cwd: process.cwd(),
-    env: process.env,
+    env: environment,
     encoding: "utf8",
     shell: useShell
   });
@@ -86,6 +98,14 @@ function run(command) {
     };
   }
   return result;
+}
+
+function withoutOpenAIEnvironment(environment) {
+  const offline = { ...environment };
+  for (const name of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"]) {
+    delete offline[name];
+  }
+  return offline;
 }
 
 function pnpmCommand(script) {

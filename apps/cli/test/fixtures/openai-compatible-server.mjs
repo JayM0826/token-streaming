@@ -9,6 +9,11 @@ const server = http.createServer((request, response) => {
   request.on("end", () => {
     const parsed = body ? JSON.parse(body) : {};
     response.setHeader("Content-Type", "application/json");
+    if (parsed.model === "failing-model") {
+      response.statusCode = 503;
+      response.end(JSON.stringify({ error: { message: "fixture upstream unavailable" } }));
+      return;
+    }
     if (request.url === "/v1/responses") {
       response.end(JSON.stringify({ output_text: "ok", model: parsed.model, usage: { input_tokens: 1, output_tokens: 1 } }));
       return;

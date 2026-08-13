@@ -59,13 +59,19 @@ test("diagnoseModelProvider reports custom OpenAI-compatible base URL", async ()
     requestedModel: "gpt-test",
     apiKey: "sk-test",
     baseUrl: "https://relay.example/v1",
+    timeoutMs: 120_000,
     probe: false
   });
 
   assert.equal(result.ok, true);
   assert.equal(result.effectiveProvider, "openai");
+  assert.equal(result.requestTimeoutMs, 120_000);
   assert.equal(
     result.checks.some((check) => check.name === "openai-base-url" && check.message.includes("https://relay.example/v1")),
+    true
+  );
+  assert.equal(
+    result.checks.some((check) => check.name === "openai-timeout" && check.message.includes("120000ms")),
     true
   );
   assert.equal(

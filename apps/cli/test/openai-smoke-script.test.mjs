@@ -11,7 +11,8 @@ test("OpenAI smoke script fails clearly without an API key", () => {
     cwd: repoRoot,
     env: {
       ...process.env,
-      OPENAI_API_KEY: ""
+      OPENAI_API_KEY: "",
+      OPENAI_TIMEOUT_MS: ""
     },
     encoding: "utf8"
   });

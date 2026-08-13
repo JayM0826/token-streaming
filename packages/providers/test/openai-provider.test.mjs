@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createModelProvider } from "../dist/factory.js";
+import { createModelProvider, resolveOpenAITimeoutMs } from "../dist/factory.js";
 import { OpenAIResponsesProvider } from "../dist/openai-provider.js";
 
 test("OpenAIResponsesProvider sends a bounded Responses API request", async () => {
@@ -129,6 +129,14 @@ test("createModelProvider rejects unknown OpenAI API protocols", () => {
     () => createModelProvider({ provider: "openai", apiKey: "relay-key", apiProtocol: "legacy" }),
     /Invalid OpenAI API protocol/
   );
+});
+
+test("resolveOpenAITimeoutMs validates relay timeout overrides", () => {
+  assert.equal(resolveOpenAITimeoutMs(undefined), 30_000);
+  assert.equal(resolveOpenAITimeoutMs("120000"), 120_000);
+  assert.throws(() => resolveOpenAITimeoutMs("0"), /Invalid OpenAI timeout/);
+  assert.throws(() => resolveOpenAITimeoutMs("not-a-number"), /Invalid OpenAI timeout/);
+  assert.throws(() => resolveOpenAITimeoutMs("600001"), /Invalid OpenAI timeout/);
 });
 
 test("OpenAIResponsesProvider extracts text from output content arrays", async () => {
