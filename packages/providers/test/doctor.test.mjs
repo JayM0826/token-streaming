@@ -51,3 +51,44 @@ test("diagnoseModelProvider can probe the stub provider", async () => {
   assert.equal(result.effectiveProvider, "stub");
   assert.equal(result.checks.some((check) => check.name === "probe" && check.status === "ok"), true);
 });
+
+test("diagnoseModelProvider reports custom OpenAI-compatible base URL", async () => {
+  const result = await diagnoseModelProvider({
+    mode: "auto",
+    requestedProvider: "openai",
+    requestedModel: "gpt-test",
+    apiKey: "sk-test",
+    baseUrl: "https://relay.example/v1",
+    probe: false
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.effectiveProvider, "openai");
+  assert.equal(
+    result.checks.some((check) => check.name === "openai-base-url" && check.message.includes("https://relay.example/v1")),
+    true
+  );
+  assert.equal(
+    result.checks.some((check) => check.name === "openai-api-protocol" && check.message.includes("/responses")),
+    true
+  );
+});
+
+test("diagnoseModelProvider reports the chat completions relay endpoint", async () => {
+  const result = await diagnoseModelProvider({
+    mode: "auto",
+    requestedProvider: "openai",
+    requestedModel: "relay-model",
+    apiKey: "relay-key",
+    baseUrl: "https://relay.example/v1/",
+    apiProtocol: "chat-completions"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(
+    result.checks.some(
+      (check) => check.name === "openai-api-protocol" && check.message.includes("https://relay.example/v1/chat/completions")
+    ),
+    true
+  );
+});

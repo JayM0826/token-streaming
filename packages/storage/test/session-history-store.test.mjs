@@ -88,3 +88,14 @@ test("SessionHistoryStore returns an empty list when no sessions exist", async (
     await rm(repoRoot, { recursive: true, force: true });
   }
 });
+
+test("SessionHistoryStore rejects session ids that escape storage", async () => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-history-"));
+  try {
+    const store = new SessionHistoryStore(repoRoot);
+    await assert.rejects(() => store.read("../../outside"), /Invalid session id/);
+    assert.throws(() => new EventLog(repoRoot, "../../outside"), /Invalid session id/);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});

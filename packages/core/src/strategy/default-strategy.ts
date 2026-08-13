@@ -39,16 +39,16 @@ function classifyTask(task: string): TaskKind {
 
 function detectRisk(input: StrategyInput): ExecutionPlan["riskLevel"] {
   const task = input.task.toLowerCase();
-  const safetyText = JSON.stringify(input.manifest.safety ?? {}).toLowerCase();
   const sensitiveNames = input.manifest.modules
     .filter((module) => /auth|payment|billing|permission|security/i.test(module.name))
     .map((module) => module.name.toLowerCase());
+  const safetyTerms = extractSafetyTerms(input.manifest.safety);
 
   if (/(auth|payment|billing|security|permission|delete|migration|prod|secret|token)/i.test(task)) {
     return "high";
   }
 
-  if (sensitiveNames.some((name) => task.includes(name)) || safetyText.includes("approval")) {
+  if (sensitiveNames.some((name) => task.includes(name)) || safetyTerms.some((term) => task.includes(term))) {
     return "high";
   }
 
@@ -63,6 +63,20 @@ function detectRisk(input: StrategyInput): ExecutionPlan["riskLevel"] {
   }
 
   return "low";
+}
+
+function extractSafetyTerms(safety: Record<string, unknown> | undefined): string[] {
+  const values = [...stringArrayFromRecord(safety, "sensitive_paths"), ...stringArrayFromRecord(safety, "requires_review")];
+  return [
+    ...new Set(
+      values.flatMap((value) =>
+        value
+          .toLowerCase()
+          .split(/[^a-z0-9_-]+/)
+          .filter((term) => term.length > 3 && !["src", "packages", "apps", "files", "changes"].includes(term))
+      )
+    )
+  ];
 }
 
 function createPhases(taskKind: TaskKind, riskLevel: ExecutionPlan["riskLevel"]): ExecutionPhase[] {
@@ -160,6 +174,10 @@ function selectTestCommands(input: StrategyInput): string[] {
   const manifestDefaultCommands = stringArrayFromRecord(input.manifest.tests, "default");
   if (manifestDefaultCommands.length > 0) {
     return manifestDefaultCommands;
+  }
+
+  if (input.repo.verificationCommands?.length) {
+    return input.repo.verificationCommands;
   }
 
   const scripts = input.repo.scripts;

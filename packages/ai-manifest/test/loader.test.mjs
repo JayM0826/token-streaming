@@ -81,3 +81,52 @@ test("loadRepoManifest reads workflow descriptions and risks", async () => {
     await rm(repoRoot, { recursive: true, force: true });
   }
 });
+
+test("loadRepoManifest maps generated repo candidates into runtime metadata", async () => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-generated-loader-"));
+  try {
+    const generatedRoot = path.join(repoRoot, ".ai", "generated");
+    await mkdir(generatedRoot, { recursive: true });
+    await writeFile(path.join(generatedRoot, "tests.yaml"), "default:\n  - python -m compileall app src\n", "utf8");
+    await writeFile(
+      path.join(generatedRoot, "repo-map.json"),
+      JSON.stringify({
+        inferredModules: [
+          {
+            name: "models",
+            root: "src/models",
+            confidence: "high",
+            evidence: ["8 file(s) under src/models"],
+            publicApiCandidates: ["src/models/encoder.py"]
+          }
+        ],
+        inferredWorkflows: [
+          {
+            name: "training",
+            root: "app/training",
+            confidence: "medium",
+            evidence: ["training entrypoint detected"],
+            touches: ["src/models"]
+          }
+        ]
+      }),
+      "utf8"
+    );
+
+    const manifest = await loadRepoManifest(repoRoot);
+
+    assert.equal(manifest.generated, true);
+    assert.equal(manifest.modules.length, 1);
+    assert.equal(manifest.modules[0]?.name, "models");
+    assert.equal(manifest.modules[0]?.generated, true);
+    assert.deepEqual(manifest.modules[0]?.publicApi, ["src/models/encoder.py"]);
+    assert.deepEqual(manifest.modules[0]?.testCommands, ["python -m compileall app src"]);
+    assert.match(manifest.modules[0]?.description ?? "", /high confidence/);
+    assert.equal(manifest.workflows.length, 1);
+    assert.equal(manifest.workflows[0]?.name, "training");
+    assert.equal(manifest.workflows[0]?.generated, true);
+    assert.deepEqual(manifest.workflows[0]?.touches, ["src/models"]);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});

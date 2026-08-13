@@ -38,7 +38,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
   constructor(options: OpenAIResponsesProviderOptions) {
     this.apiKey = options.apiKey;
     this.model = options.model ?? "gpt-5.5";
-    this.baseUrl = options.baseUrl ?? "https://api.openai.com/v1";
+    this.baseUrl = (options.baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.fetchImpl = options.fetch ?? fetch;
   }

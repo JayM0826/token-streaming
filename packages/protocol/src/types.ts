@@ -160,6 +160,7 @@ export interface RepoSummary {
   moduleManifestPaths: string[];
   workflowManifestPaths: string[];
   aiManifestPresent: boolean;
+  verificationCommands?: string[];
 }
 
 export interface LoadedManifestSummary {
@@ -194,6 +195,7 @@ export interface PlaybookManifest {
 
 export interface ModuleManifest {
   path: string;
+  generated?: boolean;
   name: string;
   description?: string;
   owners: string[];
@@ -206,6 +208,7 @@ export interface ModuleManifest {
 
 export interface WorkflowManifest {
   path: string;
+  generated?: boolean;
   name: string;
   description?: string;
   steps: string[];

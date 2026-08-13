@@ -24,8 +24,43 @@ export async function scanRepo(repoRoot: string): Promise<RepoSummary> {
     sourceDirectories,
     moduleManifestPaths,
     workflowManifestPaths,
-    aiManifestPresent
+    aiManifestPresent,
+    verificationCommands: inferVerificationCommands(trackedFiles)
   };
+}
+
+function inferVerificationCommands(trackedFiles: string[]): string[] {
+  const files = trackedFiles.map((file) => file.replace(/\\/g, "/"));
+  const pythonFiles = files.filter((file) => /\.py$/i.test(file));
+  if (pythonFiles.length === 0) {
+    return [];
+  }
+
+  const commands: string[] = [];
+  const compileTargets = [
+    ...new Set(
+      pythonFiles.map((file) => {
+        const separator = file.indexOf("/");
+        return separator === -1 ? file : file.slice(0, separator);
+      })
+    )
+  ].sort();
+  commands.push(`python -m compileall ${compileTargets.map(quoteCommandArgument).join(" ")}`);
+
+  if (files.some((file) => /(^|\/)(__tests__|tests?)(\/|$)|(^|\/)test_[^/]+\.py$|(^|\/)[^/]+_test\.py$/i.test(file))) {
+    commands.push("python -m pytest");
+  }
+  if (files.some((file) => /(^|\/)(ruff\.toml|\.ruff\.toml)$/i.test(file))) {
+    commands.push("python -m ruff check .");
+  }
+  if (files.some((file) => /(^|\/)(mypy\.ini|\.mypy\.ini)$/i.test(file))) {
+    commands.push("python -m mypy .");
+  }
+  return commands;
+}
+
+function quoteCommandArgument(value: string): string {
+  return /^[A-Za-z0-9._/-]+$/.test(value) ? value : `"${value.replace(/"/g, '\\"')}"`;
 }
 
 async function findModuleManifestPaths(repoRoot: string): Promise<string[]> {

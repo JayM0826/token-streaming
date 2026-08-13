@@ -28,6 +28,7 @@ import {
   diagnoseModelProvider,
   resolveModelSelection,
   type ModelDoctorResult,
+  type OpenAIApiProtocol,
   type ProviderName
 } from "@token-streaming/providers";
 import type {
@@ -98,6 +99,7 @@ interface ParsedArgs {
   mode: ProductMode;
   strategy: StrategyId;
   provider: ProviderName;
+  apiProtocol?: OpenAIApiProtocol;
   model?: string;
   dryRun: boolean;
   apply: boolean;
@@ -144,6 +146,10 @@ interface LiveSmokeReadiness {
   status: "missing-api-key" | "ready" | "verified" | "failed";
   verified: boolean;
   requiredEnv: string[];
+  optionalEnv: string[];
+  baseUrl: string;
+  apiProtocol: OpenAIApiProtocol;
+  endpoint: string;
   message: string;
   lastProbeStatus?: ModelDoctorResult["checks"][number]["status"];
 }
@@ -331,7 +337,8 @@ async function main(): Promise<void> {
   });
   const modelProvider = createModelProvider({
     provider: modelSelection.provider,
-    model: modelSelection.model
+    model: modelSelection.model,
+    apiProtocol: args.apiProtocol
   });
 
   const runtime = new TokenStreamingRuntime({
@@ -533,6 +540,12 @@ function parseArgs(argv: string[]): ParsedArgs {
 
     if (arg === "--provider" && args[index + 1]) {
       parsed.provider = parseProvider(args[index + 1] ?? "auto");
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--api-protocol" && args[index + 1]) {
+      parsed.apiProtocol = parseApiProtocol(args[index + 1] ?? "responses");
       index += 1;
       continue;
     }
@@ -802,6 +815,7 @@ function takesValue(arg: string | undefined): boolean {
     arg === "--mode" ||
     arg === "--strategy" ||
     arg === "--provider" ||
+    arg === "--api-protocol" ||
     arg === "--model" ||
     arg === "--patch-file" ||
     arg === "--input-file" ||
@@ -828,6 +842,13 @@ function parseProvider(value: string): ProviderName {
     return value;
   }
   throw new Error(`Invalid provider "${value}". Use stub, openai, or auto.`);
+}
+
+function parseApiProtocol(value: string): OpenAIApiProtocol {
+  if (value === "responses" || value === "chat-completions") {
+    return value;
+  }
+  throw new Error(`Invalid API protocol "${value}". Use responses or chat-completions.`);
 }
 
 function parseKeepCount(value: string): number {
@@ -881,6 +902,7 @@ Options:
   --mode <mode>          Product mode: economy, max, auto
   --strategy <id>        Orchestration strategy id, default: default
   --provider <provider>  Provider: auto, openai, stub
+  --api-protocol <type>  OpenAI endpoint: responses, chat-completions
   --model <model>        Model name for the selected provider
   --patch-file <path>    Load a structured patch proposal from a JSON file
   --input-file <path>    Load JSON input for tools run
@@ -1599,6 +1621,7 @@ async function printConfigInspection(args: ParsedArgs): Promise<void> {
     strategyAvailable: strategies.includes(args.strategy),
     availableStrategies: strategies,
     provider: args.provider,
+    apiProtocol: args.apiProtocol ?? parseApiProtocol(process.env.OPENAI_API_PROTOCOL || "responses"),
     requestedModel: args.model,
     modelSelection,
     effectiveProvider: resolveEffectiveProvider(modelSelection.provider),
@@ -1617,6 +1640,7 @@ async function printConfigInspection(args: ParsedArgs): Promise<void> {
   console.log(`Mode: ${args.mode}`);
   console.log(`Strategy: ${args.strategy} (${config.strategyAvailable ? "available" : "missing"})`);
   console.log(`Provider: ${args.provider}`);
+  console.log(`OpenAI API protocol: ${config.apiProtocol}`);
   console.log(`Model selection: provider=${modelSelection.provider}, model=${modelSelection.model ?? "provider default"}, source=${modelSelection.source}`);
   console.log(`Manifest source: ${manifest.generated ? ".ai/generated or inferred" : ".ai"}`);
   console.log(`Modules: ${manifest.modules.length}`);
@@ -2048,13 +2072,14 @@ async function runManifestVerification(
   manifest: Awaited<ReturnType<typeof loadRepoManifest>>,
   args: ParsedArgs
 ): Promise<void> {
-  const commands = stringArrayFromRecord(manifest.tests, "default");
+  const declaredCommands = stringArrayFromRecord(manifest.tests, "default");
+  const commands = declaredCommands.length > 0 ? declaredCommands : (await scanRepo(repoRoot)).verificationCommands ?? [];
   const results: Array<Record<string, unknown>> = [];
   const isJson = args.json;
 
   if (commands.length === 0 && !isJson) {
     console.log("Verification");
-    console.log("No default verification commands found in .ai/tests.yaml.");
+    console.log("No manifest-declared or safely inferred verification commands found.");
     process.exitCode = 1;
     return;
   }
@@ -2065,7 +2090,7 @@ async function runManifestVerification(
       ok: false,
       commands: [],
       results,
-      error: "No default verification commands found in .ai/tests.yaml."
+      error: "No manifest-declared or safely inferred verification commands found."
     });
     process.exitCode = 1;
     return;
@@ -2230,6 +2255,7 @@ function summarizeRepo(repo: Awaited<ReturnType<typeof scanRepo>>): Record<strin
     packageManager: repo.packageManager,
     scripts: repo.scripts,
     sourceDirectories: repo.sourceDirectories,
+    verificationCommands: repo.verificationCommands ?? [],
     moduleManifestPaths: repo.moduleManifestPaths,
     workflowManifestPaths: repo.workflowManifestPaths,
     aiManifestPresent: repo.aiManifestPresent
@@ -2268,6 +2294,7 @@ function summarizeModule(module: ModuleManifest): Record<string, unknown> {
   return {
     name: module.name,
     path: module.path,
+    generated: module.generated ?? false,
     description: module.description,
     owners: module.owners,
     publicApi: module.publicApi,
@@ -2628,6 +2655,7 @@ async function printModelDoctor(repoRoot: string, args: ParsedArgs, manifest: Aw
     mode: args.mode,
     requestedProvider: args.provider,
     requestedModel: args.model,
+    apiProtocol: args.apiProtocol,
     manifest,
     probe: args.probe
   });
@@ -2640,6 +2668,7 @@ async function printModelDoctor(repoRoot: string, args: ParsedArgs, manifest: Aw
       request: {
         provider: args.provider,
         model: args.model,
+        apiProtocol: args.apiProtocol ?? process.env.OPENAI_API_PROTOCOL ?? "responses",
         probe: args.probe
       },
       selection: result.selection,
@@ -2667,6 +2696,7 @@ async function printRepoDoctor(args: ParsedArgs, manifest: Awaited<ReturnType<ty
       mode: args.mode,
       requestedProvider: args.provider,
       requestedModel: args.model,
+      apiProtocol: args.apiProtocol,
       manifest,
       probe: args.probe
     }),
@@ -2800,6 +2830,9 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
   const command = "npx pnpm@9.15.0 smoke:openai";
   const probe = modelDoctor.checks.find((check) => check.name === "probe");
   const hasApiKey = Boolean(process.env.OPENAI_API_KEY);
+  const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+  const apiProtocol = args.apiProtocol ?? parseApiProtocol(process.env.OPENAI_API_PROTOCOL || "responses");
+  const endpoint = `${baseUrl.replace(/\/+$/, "")}/${apiProtocol === "responses" ? "responses" : "chat/completions"}`;
   const verified = Boolean(args.probe && modelDoctor.effectiveProvider === "openai" && probe?.status === "ok");
   const failed = Boolean(args.probe && modelDoctor.effectiveProvider === "openai" && probe?.status === "error");
 
@@ -2810,6 +2843,10 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
       status: "verified",
       verified: true,
       requiredEnv: ["OPENAI_API_KEY"],
+      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"],
+      baseUrl,
+      apiProtocol,
+      endpoint,
       message: "OpenAI live probe completed successfully.",
       lastProbeStatus: probe?.status
     };
@@ -2822,6 +2859,10 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
       status: "failed",
       verified: false,
       requiredEnv: ["OPENAI_API_KEY"],
+      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"],
+      baseUrl,
+      apiProtocol,
+      endpoint,
       message: probe?.message ?? "OpenAI live probe failed.",
       lastProbeStatus: probe?.status
     };
@@ -2834,6 +2875,10 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
       status: "missing-api-key",
       verified: false,
       requiredEnv: ["OPENAI_API_KEY"],
+      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"],
+      baseUrl,
+      apiProtocol,
+      endpoint,
       message: "OPENAI_API_KEY is not set, so the OpenAI live smoke test cannot run.",
       lastProbeStatus: probe?.status
     };
@@ -2845,7 +2890,11 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
     status: "ready",
     verified: false,
     requiredEnv: ["OPENAI_API_KEY"],
-    message: "OPENAI_API_KEY is available. Run the smoke command to verify the live OpenAI path.",
+    optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"],
+    baseUrl,
+    apiProtocol,
+    endpoint,
+    message: `OPENAI_API_KEY is available. Run the smoke command to verify ${endpoint}.`,
     lastProbeStatus: probe?.status
   };
 }

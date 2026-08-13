@@ -127,6 +127,9 @@ test("generateFallbackManifest infers Python package modules for research repos"
       packageManager: undefined,
       scripts: {},
       trackedFiles: [
+        "pyproject.toml",
+        "ruff.toml",
+        "mypy.ini",
         "app/main.py",
         "app/vjepa/train.py",
         "app/vjepa/transforms.py",
@@ -139,11 +142,20 @@ test("generateFallbackManifest infers Python package modules for research repos"
       sourceDirectories: ["src", "app"]
     });
     const repoMap = JSON.parse(await readFile(path.join(result.root, "repo-map.json"), "utf8"));
+    const commands = await readFile(path.join(result.root, "commands.yaml"), "utf8");
+    const tests = await readFile(path.join(result.root, "tests.yaml"), "utf8");
 
     assert.equal(repoMap.inferredModules.some((candidate) => candidate.root === "app/vjepa"), true);
     assert.equal(repoMap.inferredModules.some((candidate) => candidate.root === "src/models"), true);
     assert.equal(repoMap.inferredModules.some((candidate) => candidate.root === "src/datasets"), true);
     assert.match(repoMap.inferredModules.find((candidate) => candidate.root === "app/vjepa").evidence.join("\n"), /public API-like/);
+    assert.match(commands, /python -m pip install -e \./);
+    assert.match(commands, /python -m pytest/);
+    assert.match(commands, /python -m ruff check \./);
+    assert.match(commands, /python -m mypy \./);
+    assert.match(tests, /python -m pytest/);
+    assert.match(tests, /python -m ruff check \./);
+    assert.match(tests, /python -m mypy \./);
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
   }

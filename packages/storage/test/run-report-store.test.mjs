@@ -216,3 +216,13 @@ test("RunReportStore returns an empty list when no reports exist", async () => {
     await rm(repoRoot, { recursive: true, force: true });
   }
 });
+
+test("RunReportStore rejects report ids that escape storage", async () => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-reports-"));
+  try {
+    const store = new RunReportStore(repoRoot);
+    await assert.rejects(() => store.read("../../outside"), /Invalid report id/);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});

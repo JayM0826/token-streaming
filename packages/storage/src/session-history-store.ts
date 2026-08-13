@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { SessionEvent } from "@token-streaming/protocol";
 import { classifyFailure, type FailureCategory } from "./failure-category.js";
+import { assertSafeStorageId } from "./safe-id.js";
 
 export interface SessionHistorySummary {
   sessionId: string;
@@ -55,6 +56,7 @@ export class SessionHistoryStore {
   }
 
   getSessionPath(sessionId: string): string {
+    assertSafeStorageId("session", sessionId);
     return path.join(this.getSessionsDirectory(), `${sessionId}.jsonl`);
   }
 

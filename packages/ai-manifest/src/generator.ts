@@ -112,8 +112,9 @@ export async function scaffoldOfficialManifest(
 
   const created: string[] = [];
   const skipped: string[] = [];
-  const packageManager = summary.packageManager ?? "pnpm";
+  const packageManager = summary.packageManager ?? (isPythonRepository(summary) ? "Python" : "unknown");
   const testCommands = inferTestCommands(summary);
+  const commandGroups = inferCommandGroups(summary);
 
   await writeOfficialFile(
     aiRoot,
@@ -174,10 +175,11 @@ export async function scaffoldOfficialManifest(
     aiRoot,
     "commands.yaml",
     stringifySimpleYaml({
-      install: [`${packageManager} install`],
-      build: scriptCommand(summary, "build"),
-      test: scriptCommand(summary, "test"),
-      lint: scriptCommand(summary, "lint")
+      install: inferInstallCommands(summary),
+      build: commandGroups.build ?? [],
+      test: commandGroups.test ?? [],
+      lint: commandGroups.lint ?? [],
+      typecheck: commandGroups.typecheck ?? []
     }),
     options,
     created,
@@ -273,14 +275,71 @@ export async function scaffoldOfficialManifest(
 }
 
 function inferTestCommands(summary: RepoSummary): string[] {
-  return inferTestScriptNames(summary.scripts).map((name) => `${summary.packageManager ?? "pnpm"} run ${name}`);
+  const scriptCommands = inferTestScriptNames(summary.scripts).map((name) => `${summary.packageManager ?? "pnpm"} run ${name}`);
+  const pythonCommands = inferPythonCommandGroups(summary);
+  return [
+    ...new Set([
+      ...scriptCommands,
+      ...(summary.verificationCommands ?? []),
+      ...(pythonCommands.test ?? []),
+      ...(pythonCommands.lint ?? []),
+      ...(pythonCommands.typecheck ?? [])
+    ])
+  ];
 }
 
 function inferCommandGroups(summary: RepoSummary): Record<string, string[]> {
-  return Object.fromEntries(
+  const scriptGroups = Object.fromEntries(
     Object.keys(summary.scripts)
       .sort()
       .map((name) => [name, [`${summary.packageManager ?? "pnpm"} run ${name}`]])
+  );
+  const pythonGroups = inferPythonCommandGroups(summary);
+  const install = inferInstallCommands(summary);
+  return { ...(install.length ? { install } : {}), ...pythonGroups, ...scriptGroups };
+}
+
+function inferInstallCommands(summary: RepoSummary): string[] {
+  if (summary.packageManager) {
+    return [`${summary.packageManager} install`];
+  }
+  const files = new Set(summary.trackedFiles.map((file) => normalizeRepoPath(file).toLowerCase()));
+  if (files.has("uv.lock")) {
+    return ["uv sync"];
+  }
+  if (files.has("poetry.lock")) {
+    return ["poetry install"];
+  }
+  if (files.has("requirements.txt")) {
+    return ["python -m pip install -r requirements.txt"];
+  }
+  if (files.has("pyproject.toml") || files.has("setup.py")) {
+    return ["python -m pip install -e ."];
+  }
+  return [];
+}
+
+function inferPythonCommandGroups(summary: RepoSummary): Record<string, string[]> {
+  if (!isPythonRepository(summary)) {
+    return {};
+  }
+  const files = summary.trackedFiles.map((file) => normalizeRepoPath(file).toLowerCase());
+  const groups: Record<string, string[]> = {};
+  if (files.some((file) => isTestFile(file)) || files.some((file) => /(^|\/)(pytest\.ini|conftest\.py)$/.test(file))) {
+    groups.test = ["python -m pytest"];
+  }
+  if (files.some((file) => /(^|\/)(ruff\.toml|\.ruff\.toml)$/.test(file))) {
+    groups.lint = ["python -m ruff check ."];
+  }
+  if (files.some((file) => /(^|\/)(mypy\.ini|\.mypy\.ini)$/.test(file))) {
+    groups.typecheck = ["python -m mypy ."];
+  }
+  return groups;
+}
+
+function isPythonRepository(summary: RepoSummary): boolean {
+  return summary.trackedFiles.some(
+    (file) => /\.py$/i.test(file) || /(^|\/)(pyproject\.toml|requirements\.txt|setup\.py)$/i.test(normalizeRepoPath(file))
   );
 }
 
@@ -294,6 +353,7 @@ function buildGeneratedRepoMap(summary: RepoSummary): Record<string, unknown> {
     sourceDirectories: summary.sourceDirectories,
     moduleManifestPaths: summary.moduleManifestPaths,
     workflowManifestPaths: summary.workflowManifestPaths,
+    verificationCommands: summary.verificationCommands ?? [],
     inferredModules: moduleCandidates,
     inferredWorkflows: workflowCandidates,
     testMappings: inferTestMappings(normalizedFiles, moduleCandidates, workflowCandidates),

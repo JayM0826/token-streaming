@@ -220,3 +220,40 @@ test("validateRepoManifest reports invalid model routing metadata", async () => 
     await rm(repoRoot, { recursive: true, force: true });
   }
 });
+
+test("validateRepoManifest treats incomplete generated fallback metadata as warnings", async () => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-generated-validation-"));
+  try {
+    const result = await validateRepoManifest(repoRoot, {
+      project: "# Generated project",
+      architecture: "# Generated architecture",
+      commands: {},
+      tests: { default: [] },
+      playbooks: [],
+      modules: [
+        {
+          path: path.join(repoRoot, "src", "models", "module.yaml"),
+          generated: true,
+          name: "models",
+          description: "Generated module candidate.",
+          owners: [],
+          publicApi: [],
+          dependsOn: [],
+          usedBy: [],
+          testCommands: [],
+          rules: []
+        }
+      ],
+      workflows: [],
+      generated: true
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.issues.some((issue) => issue.severity === "error"), false);
+    assert.equal(result.issues.some((issue) => issue.code === "manifest.generated"), true);
+    assert.equal(result.issues.some((issue) => issue.code === "root.conventions.missing" && issue.severity === "warning"), true);
+    assert.equal(result.issues.some((issue) => issue.code === "module.public_api.missing" && issue.severity === "warning"), true);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -52,5 +52,30 @@ test("applyFilePatches writes files inside the repo", async () => {
     assert.equal(await readFile(path.join(repoRoot, "nested", "file.txt"), "utf8"), "written\n");
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("applyFilePatches blocks symbolic links that resolve outside the repository", async (t) => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-patch-link-"));
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-outside-"));
+  try {
+    try {
+      await symlink(outsideRoot, path.join(repoRoot, "linked"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error.code === "EPERM" || error.code === "EACCES")) {
+        t.skip("Symbolic links are not available in this environment.");
+        return;
+      }
+      throw error;
+    }
+
+    await assert.rejects(
+      () => applyFilePatches(repoRoot, [{ path: "linked/escaped.txt", content: "blocked\n" }]),
+      /symbolic link/
+    );
+    await assert.rejects(() => readFile(path.join(outsideRoot, "escaped.txt"), "utf8"), /ENOENT/);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+    await rm(outsideRoot, { recursive: true, force: true });
   }
 });

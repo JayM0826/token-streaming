@@ -32,6 +32,7 @@ export async function validateRepoManifest(repoRoot: string, manifest: RepoManif
 }
 
 function validateRootManifest(manifest: RepoManifest, issues: ManifestValidationIssue[]): void {
+  const missingSeverity: ManifestValidationSeverity = manifest.generated ? "warning" : "error";
   if (manifest.generated) {
     issues.push({
       severity: "warning",
@@ -47,7 +48,7 @@ function validateRootManifest(manifest: RepoManifest, issues: ManifestValidation
   ] as const) {
     if (!hasText(manifest[field])) {
       issues.push({
-        severity: "error",
+        severity: missingSeverity,
         code: `root.${field}.missing`,
         message: `Missing required root manifest content in ${file}.`,
         path: file
@@ -57,7 +58,7 @@ function validateRootManifest(manifest: RepoManifest, issues: ManifestValidation
 
   if (listManifestCommandGroups(manifest).length === 0) {
     issues.push({
-      severity: "error",
+      severity: missingSeverity,
       code: "commands.empty",
       message: "No executable command catalog found in .ai/commands.yaml.",
       path: ".ai/commands.yaml"
@@ -67,7 +68,7 @@ function validateRootManifest(manifest: RepoManifest, issues: ManifestValidation
   const defaultTests = stringArray(manifest.tests?.default);
   if (defaultTests.length === 0) {
     issues.push({
-      severity: "error",
+      severity: missingSeverity,
       code: "tests.default.missing",
       message: "Missing default verification commands in .ai/tests.yaml.",
       path: ".ai/tests.yaml"
@@ -294,7 +295,7 @@ function validatePlaybooks(manifest: RepoManifest, issues: ManifestValidationIss
 
 function issueForModule(module: ModuleManifest, code: string, message: string): ManifestValidationIssue {
   return {
-    severity: "error",
+    severity: module.generated ? "warning" : "error",
     code,
     message,
     path: module.path

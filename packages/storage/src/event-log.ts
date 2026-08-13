@@ -1,11 +1,13 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { SessionEvent } from "@token-streaming/protocol";
+import { assertSafeStorageId } from "./safe-id.js";
 
 export class EventLog {
   private readonly filePath: string;
 
   constructor(private readonly repoRoot: string, private readonly sessionId: string) {
+    assertSafeStorageId("session", sessionId);
     this.filePath = path.join(repoRoot, ".token-streaming", "sessions", `${sessionId}.jsonl`);
   }
 

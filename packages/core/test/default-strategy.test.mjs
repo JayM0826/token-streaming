@@ -69,6 +69,24 @@ test("DefaultStrategy uses root tests.yaml default commands when no targeted man
   assert.deepEqual(plan.testCommands, ["pnpm build", "pnpm test"]);
 });
 
+test("DefaultStrategy falls back to scanner verification commands when generated tests are empty", async () => {
+  const plan = await new DefaultStrategy().createPlan(
+    createInput("fix Python syntax", {
+      repo: {
+        verificationCommands: ["python -m compileall app src"]
+      },
+      manifest: {
+        generated: true,
+        tests: {
+          default: []
+        }
+      }
+    })
+  );
+
+  assert.deepEqual(plan.testCommands, ["python -m compileall app src"]);
+});
+
 test("DefaultStrategy prefers targeted module commands over root defaults", async () => {
   const plan = await new DefaultStrategy().createPlan(
     createInput("fix payment refund failure", {
@@ -143,6 +161,40 @@ test("DefaultStrategy treats matched workflows without high-risk keywords as med
     plan.phases.map((phase) => phase.id),
     ["orchestrate", "research", "review"]
   );
+});
+
+test("DefaultStrategy does not raise unrelated tasks merely because approvals are configured", async () => {
+  const strategy = new DefaultStrategy();
+  const plan = await strategy.createPlan(
+    createInput("summarize repository layout", {
+      manifest: {
+      safety: {
+        approval_required_commands: ["npm publish"],
+        sensitive_paths: ["src/modules/payment/**"],
+        requires_review: ["payment provider changes"]
+      }
+      }
+    })
+  );
+
+  assert.equal(plan.riskLevel, "low");
+  assert.equal(plan.requiredAgents.includes("reviewer"), false);
+});
+
+test("DefaultStrategy raises risk when task text matches a safety review term", async () => {
+  const strategy = new DefaultStrategy();
+  const plan = await strategy.createPlan(
+    createInput("update provider integration", {
+      manifest: {
+        safety: {
+          requires_review: ["provider integration changes"]
+        }
+      }
+    })
+  );
+
+  assert.equal(plan.riskLevel, "high");
+  assert.equal(plan.requiredAgents.includes("reviewer"), true);
 });
 
 function createInput(task, overrides = {}) {

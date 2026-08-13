@@ -13,6 +13,7 @@ import type {
   VerificationResult
 } from "@token-streaming/protocol";
 import { classifyFailure, type FailureCategory } from "./failure-category.js";
+import { assertSafeStorageId } from "./safe-id.js";
 
 export interface RunReportInput {
   session: Session;
@@ -112,6 +113,7 @@ export class RunReportStore {
   }
 
   getReportPath(sessionId: string): string {
+    assertSafeStorageId("report", sessionId);
     return path.join(this.getReportsDirectory(), `${sessionId}.md`);
   }
 

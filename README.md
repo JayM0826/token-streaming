@@ -12,7 +12,7 @@ The first implementation focuses on one real orchestration strategy: `default`.
 - Apply edits through a patch/checkpoint boundary.
 - Leave room for future strategies and product modes without implementing them all up front.
 
-See [docs/implementation-plan.md](docs/implementation-plan.md) for the full plan, and [docs/codex-build-brief.zh.md](docs/codex-build-brief.zh.md) for the Chinese product/engineering brief plus the complete Codex development prompt.
+See [docs/implementation-plan.md](docs/implementation-plan.md) for the full plan, [docs/codex-build-brief.zh.md](docs/codex-build-brief.zh.md) for the Chinese product/engineering brief, and [docs/v1-acceptance-matrix.md](docs/v1-acceptance-matrix.md) for requirement-by-requirement verification evidence.
 
 ## Development
 
@@ -29,7 +29,7 @@ node apps/cli/dist/index.js --version
 
 `pnpm test` compiles all workspace packages and then runs the Node.js behavior tests in `packages/**/*.test.mjs` and `apps/**/*.test.mjs` against the compiled `dist` output.
 `pnpm package:check` verifies release readiness for the CLI and workspace packages: package metadata, dist entrypoints, type declarations, package file allowlists, Node engine constraints, and CLI bin shebangs.
-`pnpm acceptance:check` runs the offline gates and verifies that OpenAI live smoke has passed. Without `OPENAI_API_KEY`, it exits incomplete with a machine-readable `missing-api-key` status.
+`pnpm acceptance:check` runs the offline gates and, when `OPENAI_API_KEY` is present, performs its own live provider probe. Without a key, it exits incomplete with a machine-readable `missing-api-key` status.
 
 ## CLI Usage
 
@@ -134,6 +134,9 @@ Provider behavior:
 - `auto` uses OpenAI when `OPENAI_API_KEY` is present.
 - `auto` falls back to the stub provider when no API key is present.
 - `--provider openai` requires `OPENAI_API_KEY`.
+- `OPENAI_BASE_URL` optionally points the OpenAI provider at an OpenAI-compatible relay or gateway.
+- `OPENAI_API_PROTOCOL` selects `responses` (default) or `chat-completions`; the equivalent CLI option is `--api-protocol`.
+- A relay must expose either `<base-url>/responses` or `<base-url>/chat/completions`, matching the selected protocol.
 - `--model` overrides repository model policy.
 - `doctor repo` aggregates repository, manifest, model, git, storage, and tool readiness without running tests or calling a model by default.
 - `doctor repo --json` also exposes OpenAI live smoke readiness plus latest session, report, and checkpoint inspection commands for host UIs.
@@ -142,6 +145,25 @@ Provider behavior:
 - `doctor models --json` exposes model readiness checks, skipped/warning/error counts, selected model, and effective provider.
 - `doctor models --probe` sends a minimal provider request with low reasoning effort, a small output cap, timeout handling, and structured upstream error reporting.
 - `pnpm smoke:openai` requires `OPENAI_API_KEY` and runs the real OpenAI probe path through the built CLI.
+- To test a third-party OpenAI-compatible relay, set both environment variables before probing:
+
+```bash
+export OPENAI_API_KEY="relay-api-key"
+export OPENAI_BASE_URL="https://relay.example/v1"
+export OPENAI_API_PROTOCOL="responses"
+pnpm cli -- --provider openai --model gpt-5.5 doctor models --probe --json
+pnpm smoke:openai
+```
+
+For relays that only implement Chat Completions:
+
+```bash
+export OPENAI_API_KEY="relay-api-key"
+export OPENAI_BASE_URL="https://relay.example/v1"
+export OPENAI_API_PROTOCOL="chat-completions"
+pnpm cli -- --provider openai --model relay-model doctor models --probe --json
+pnpm acceptance:check -- --json
+```
 - `pnpm acceptance:check -- --json` is the final acceptance gate: offline quality checks plus OpenAI live-smoke verification.
 
 Mode behavior:

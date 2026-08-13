@@ -85,7 +85,9 @@ test("CLI generates and inspects fallback manifests as JSON", async () => {
   assert.equal(generated.manifest.generated, true);
   assert.equal(generated.manifest.hasProject, true);
   assert.equal(generated.manifest.hasArchitecture, true);
-  assert.equal(generated.validation.ok, false);
+  assert.equal(generated.validation.ok, true);
+  assert.equal(generated.validation.counts.errors, 0);
+  assert.equal(generated.validation.counts.warnings > 0, true);
   assert.equal(inspected.kind, "manifest-inspection");
   assert.equal(inspected.source, ".ai/generated");
   assert.equal(inspected.officialManifestPresent, false);
@@ -217,7 +219,9 @@ test("CLI exposes effective configuration as JSON", async () => {
     "utf8"
   );
 
-  const output = runCli(["-C", cwd, "--mode", "auto", "config", "inspect", "--json"], { OPENAI_API_KEY: "" });
+  const output = runCli(["-C", cwd, "--mode", "auto", "--api-protocol", "chat-completions", "config", "inspect", "--json"], {
+    OPENAI_API_KEY: ""
+  });
 
   assert.equal(output.kind, "config-inspection");
   assert.equal(output.cwd, cwd);
@@ -225,6 +229,7 @@ test("CLI exposes effective configuration as JSON", async () => {
   assert.equal(output.strategy, "default");
   assert.equal(output.strategyAvailable, true);
   assert.deepEqual(output.availableStrategies, ["default"]);
+  assert.equal(output.apiProtocol, "chat-completions");
   assert.equal(output.modelSelection.provider, "auto");
   assert.equal(output.modelSelection.model, "balanced-model");
   assert.equal(output.effectiveProvider, "stub");
@@ -456,6 +461,19 @@ test("CLI verifies manifest default commands as JSON", async () => {
   assert.equal(marker, "ok");
 });
 
+test("CLI verify falls back to conservatively inferred Python commands", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "token-streaming-python-verify-"));
+  await mkdir(path.join(cwd, "src"), { recursive: true });
+  await writeFile(path.join(cwd, "src", "module.py"), "VALUE = 1\n", "utf8");
+
+  const output = runCli(["-C", cwd, "verify", "--json"]);
+
+  assert.equal(output.kind, "verification");
+  assert.equal(output.ok, true);
+  assert.deepEqual(output.commands, ["python -m compileall src"]);
+  assert.equal(output.results[0].exitCode, 0);
+});
+
 test("CLI blocks forbidden verification commands as JSON", async () => {
   const cwd = await createManifestRepo();
   const command = "node -e \"require('fs').writeFileSync('blocked-ran.txt', 'bad')\"";
@@ -657,6 +675,20 @@ test("CLI exposes session, report, and checkpoint inspection as JSON", async () 
   assert.equal(latestSession.sessionId, run.session.id);
   assert.equal(latestReport.sessionId, run.session.id);
   assert.equal(latestCheckpoint.checkpoint.id, checkpoints.checkpoints[0].id);
+});
+
+test("CLI rejects storage ids that attempt path traversal", async () => {
+  const cwd = await createManifestRepo();
+  const sessionResult = runCliRaw(["-C", cwd, "sessions", "show", "../../outside", "--json"]);
+  const reportResult = runCliRaw(["-C", cwd, "reports", "show", "../../outside", "--json"]);
+  const checkpointResult = runCliRaw(["-C", cwd, "checkpoints", "show", "../../outside", "--json"]);
+
+  assert.equal(sessionResult.status, 1);
+  assert.match(JSON.parse(sessionResult.stdout).message, /Invalid session id/);
+  assert.equal(reportResult.status, 1);
+  assert.match(JSON.parse(reportResult.stdout).message, /Invalid report id/);
+  assert.equal(checkpointResult.status, 1);
+  assert.match(JSON.parse(checkpointResult.stdout).message, /Invalid checkpoint id/);
 });
 
 test("CLI previews history pruning as JSON without deleting history", async () => {
@@ -893,6 +925,9 @@ test("CLI exposes repository doctor readiness as JSON", async () => {
   assert.equal(output.liveSmoke.status, "missing-api-key");
   assert.equal(output.liveSmoke.verified, false);
   assert.deepEqual(output.liveSmoke.requiredEnv, ["OPENAI_API_KEY"]);
+  assert.deepEqual(output.liveSmoke.optionalEnv, ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL"]);
+  assert.equal(output.liveSmoke.apiProtocol, "responses");
+  assert.equal(output.liveSmoke.endpoint, "https://api.openai.com/v1/responses");
   assert.equal(output.liveSmoke.command, "npx pnpm@9.15.0 smoke:openai");
   assert.equal(typeof output.git.clean, "boolean");
   assert.equal(typeof output.storage.sessions, "number");

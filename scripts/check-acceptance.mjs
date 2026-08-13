@@ -3,6 +3,11 @@ import { spawnSync } from "node:child_process";
 
 const quick = process.argv.includes("--quick");
 const json = process.argv.includes("--json");
+const repositoryDoctorArgs = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo"];
+if (process.env.OPENAI_API_KEY) {
+  repositoryDoctorArgs.push("--provider", "openai", "--probe");
+}
+repositoryDoctorArgs.push("--json");
 
 const steps = [
   ...(quick
@@ -13,7 +18,7 @@ const steps = [
       ]),
   ["package", [process.execPath, "scripts/check-package-readiness.mjs"]],
   ["manifest", [process.execPath, "apps/cli/dist/index.js", "manifest", "validate", "--json"]],
-  ["repository-doctor", [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--json"]]
+  ["repository-doctor", repositoryDoctorArgs]
 ];
 
 const results = [];

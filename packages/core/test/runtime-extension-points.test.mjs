@@ -209,6 +209,41 @@ test("TokenStreamingRuntime records run.failed when the model provider throws", 
   }
 });
 
+test("TokenStreamingRuntime records a report when initialization fails", async () => {
+  const repoRoot = await createRepo();
+  try {
+    const failingStrategy = {
+      id: "failing-init",
+      async createPlan() {
+        throw new Error("strategy initialization exploded");
+      }
+    };
+    const runtime = new TokenStreamingRuntime({
+      repoRoot,
+      strategy: "failing-init",
+      strategies: [failingStrategy],
+      modelProvider: new RecordingProvider()
+    });
+
+    await assert.rejects(() => runtime.runTask({ task: "initialize failing strategy" }), /strategy initialization exploded/);
+
+    const sessionFiles = await readdir(path.join(repoRoot, ".token-streaming", "sessions"));
+    const reportFiles = await readdir(path.join(repoRoot, ".token-streaming", "reports"));
+    assert.equal(sessionFiles.length, 1);
+    assert.equal(reportFiles.length, 1);
+
+    const eventLog = await readFile(path.join(repoRoot, ".token-streaming", "sessions", sessionFiles[0]), "utf8");
+    const report = await readFile(path.join(repoRoot, ".token-streaming", "reports", reportFiles[0]), "utf8");
+    assert.match(eventLog, /"type":"run.failed"/);
+    assert.match(eventLog, /Run failed during initialization: strategy initialization exploded/);
+    assert.match(eventLog, /"type":"review.completed"/);
+    assert.match(report, /Run failed during initialization: strategy initialization exploded/);
+    assert.match(report, /Recommendation: Resolve the initialization failure before continuing\./);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("TokenStreamingRuntime records run.failed when a patch proposal cannot be parsed", async () => {
   const repoRoot = await createRepo();
   try {

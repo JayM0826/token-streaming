@@ -138,54 +138,14 @@ export class TokenStreamingRuntime {
       })
     );
 
-    let repo = await scanRepo(this.repoRoot);
-
-    await eventLog.append(
-      this.sessionManager.createEvent({
-        type: "repo.scanned",
-        sessionId: session.id,
-        summary: repo
-      })
-    );
-
-    if (!repo.aiManifestPresent) {
-      await generateFallbackManifest(this.repoRoot, repo);
-      repo = await scanRepo(this.repoRoot);
+    let initialized: Awaited<ReturnType<TokenStreamingRuntime["initializeTask"]>>;
+    try {
+      initialized = await this.initializeTask(options.task, session, eventLog);
+    } catch (error) {
+      await this.writeInitializationFailureReport(options.task, session, eventLog, reportStore, error);
+      throw error;
     }
-
-    const manifest = await loadRepoManifest(this.repoRoot);
-
-    await eventLog.append(
-      this.sessionManager.createEvent({
-        type: "manifest.loaded",
-        sessionId: session.id,
-        manifest: {
-          hasRootManifest: repo.aiManifestPresent,
-          moduleCount: manifest.modules.length,
-          workflowCount: manifest.workflows.length,
-          playbookCount: manifest.playbooks.length,
-          generated: manifest.generated
-        }
-      })
-    );
-
-    const plan = await this.strategy.createPlan({
-      task: options.task,
-      mode: this.mode,
-      repo,
-      manifest
-    });
-
-    await eventLog.append(
-      this.sessionManager.createEvent({
-        type: "plan.created",
-        sessionId: session.id,
-        plan
-      })
-    );
-
-    const recentHistory = await this.loadRecentHistoryContext(session.id);
-    const context = await buildRuntimeContext(options.task, repo, manifest, plan, { recentHistory });
+    const { repo, manifest, plan, context } = initialized;
 
     const verificationResults: VerificationResult[] = [];
     const permissionDecisions: PermissionDecision[] = [];
@@ -506,6 +466,106 @@ export class TokenStreamingRuntime {
       review,
       context
     };
+  }
+
+  private async initializeTask(
+    task: string,
+    session: Session,
+    eventLog: ReturnType<SessionManager["createEventLog"]>
+  ): Promise<{ repo: RepoSummary; manifest: RepoManifest; plan: ExecutionPlan; context: RuntimeContextBundle }> {
+    let repo = await scanRepo(this.repoRoot);
+
+    await eventLog.append(
+      this.sessionManager.createEvent({
+        type: "repo.scanned",
+        sessionId: session.id,
+        summary: repo
+      })
+    );
+
+    if (!repo.aiManifestPresent) {
+      await generateFallbackManifest(this.repoRoot, repo);
+      repo = await scanRepo(this.repoRoot);
+    }
+
+    const manifest = await loadRepoManifest(this.repoRoot);
+    await eventLog.append(
+      this.sessionManager.createEvent({
+        type: "manifest.loaded",
+        sessionId: session.id,
+        manifest: {
+          hasRootManifest: repo.aiManifestPresent,
+          moduleCount: manifest.modules.length,
+          workflowCount: manifest.workflows.length,
+          playbookCount: manifest.playbooks.length,
+          generated: manifest.generated
+        }
+      })
+    );
+
+    const plan = await this.strategy.createPlan({ task, mode: this.mode, repo, manifest });
+    await eventLog.append(
+      this.sessionManager.createEvent({
+        type: "plan.created",
+        sessionId: session.id,
+        plan
+      })
+    );
+
+    const recentHistory = await this.loadRecentHistoryContext(session.id);
+    const context = await buildRuntimeContext(task, repo, manifest, plan, { recentHistory });
+    return { repo, manifest, plan, context };
+  }
+
+  private async writeInitializationFailureReport(
+    task: string,
+    session: Session,
+    eventLog: ReturnType<SessionManager["createEventLog"]>,
+    reportStore: RunReportStore,
+    error: unknown
+  ): Promise<void> {
+    const failureMessage = `Run failed during initialization: ${formatErrorMessage(error)}`;
+    const repo = emptyRepoSummary(this.repoRoot);
+    const manifest = emptyRepoManifest();
+    const plan = initializationFailurePlan(task, this.mode, this.strategy.id);
+    const context = emptyRuntimeContext();
+    const review: ReviewSummary = {
+      riskLevel: plan.riskLevel,
+      verificationStatus: "not-run",
+      hasRepositoryChanges: false,
+      appliedFiles: [],
+      permissionChecks: 0,
+      approvals: 0,
+      findings: [failureMessage],
+      recommendation: "Resolve the initialization failure before continuing."
+    };
+    const [gitDiff, gitStatus] = await Promise.all([safeGitDiff(this.repoRoot), safeGitStatus(this.repoRoot)]);
+
+    await this.appendRunFailed(eventLog, session.id, failureMessage);
+    await eventLog.append(
+      this.sessionManager.createEvent({
+        type: "review.completed",
+        sessionId: session.id,
+        review
+      })
+    );
+    await reportStore.write({
+      session,
+      repo,
+      manifest,
+      plan,
+      context,
+      summary: failureMessage,
+      eventLogPath: eventLog.path,
+      review,
+      changes: {
+        patchProposalFiles: [],
+        repairProposalFiles: [],
+        appliedFiles: [],
+        gitDiff,
+        gitStatus
+      }
+    });
   }
 
   private async callModel(input: {
@@ -1068,6 +1128,61 @@ async function safeGitStatus(repoRoot: string): Promise<string> {
   } catch {
     return "";
   }
+}
+
+function emptyRepoSummary(repoRoot: string): RepoSummary {
+  return {
+    root: repoRoot,
+    scripts: {},
+    trackedFiles: [],
+    sourceDirectories: [],
+    moduleManifestPaths: [],
+    workflowManifestPaths: [],
+    aiManifestPresent: false
+  };
+}
+
+function emptyRepoManifest(): RepoManifest {
+  return {
+    playbooks: [],
+    modules: [],
+    workflows: [],
+    generated: true
+  };
+}
+
+function initializationFailurePlan(task: string, mode: ProductMode, strategy: StrategyId): ExecutionPlan {
+  return {
+    strategy,
+    mode,
+    task,
+    riskLevel: "medium",
+    phases: [
+      {
+        id: "initialize",
+        role: "orchestrator",
+        title: "Initialize repository context",
+        description: "Scan the repository and load its manifest before planning work.",
+        required: true
+      }
+    ],
+    requiredAgents: ["orchestrator"],
+    handoffs: [],
+    testCommands: [],
+    notes: ["Initialization did not complete."]
+  };
+}
+
+function emptyRuntimeContext(): RuntimeContextBundle {
+  return {
+    overview: "Runtime context was unavailable because initialization failed.",
+    relevantModules: [],
+    relevantWorkflows: [],
+    selectionReasons: [],
+    sourceSnippets: [],
+    testCommands: [],
+    recentHistory: []
+  };
 }
 
 function createId(prefix: string): string {

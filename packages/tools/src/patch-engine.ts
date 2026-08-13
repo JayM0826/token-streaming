@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { PatchProposal, ProposedFilePatch } from "@token-streaming/protocol";
-import { resolveInsideRepo } from "./filesystem.js";
+import { resolveInsideRepoReal } from "./filesystem.js";
 
 export interface PatchResult {
   files: string[];
@@ -11,7 +11,7 @@ export async function applyFilePatches(repoRoot: string, patches: ProposedFilePa
   const files: string[] = [];
 
   for (const patch of patches) {
-    const filePath = resolveInsideRepo(repoRoot, patch.path);
+    const filePath = await resolveInsideRepoReal(repoRoot, patch.path);
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.writeFile(filePath, patch.content, "utf8");
     files.push(patch.path);

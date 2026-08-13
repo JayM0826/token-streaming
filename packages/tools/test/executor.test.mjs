@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -44,4 +44,29 @@ test("runReadOnlyTool preserves repository path safety", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "token-streaming-tool-escape-"));
 
   await assert.rejects(runReadOnlyTool("file.read", { repoRoot: cwd, path: "../outside.txt" }), /escapes repository root/);
+});
+
+test("runReadOnlyTool blocks symbolic links that resolve outside the repository", async (t) => {
+  const repoRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-tool-link-"));
+  const outsideRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-outside-"));
+  try {
+    await writeFile(path.join(outsideRoot, "secret.txt"), "outside\n", "utf8");
+    try {
+      await symlink(outsideRoot, path.join(repoRoot, "linked"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error.code === "EPERM" || error.code === "EACCES")) {
+        t.skip("Symbolic links are not available in this environment.");
+        return;
+      }
+      throw error;
+    }
+
+    await assert.rejects(
+      () => runReadOnlyTool("file.read", { repoRoot, path: "linked/secret.txt" }),
+      /symbolic link/
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
 });

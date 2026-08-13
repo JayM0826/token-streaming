@@ -16,7 +16,7 @@ export async function loadRepoManifest(repoRoot: string): Promise<RepoManifest> 
   const hasRootManifest = await hasOfficialRootManifest(aiRoot);
   const fallbackRoot = hasRootManifest ? aiRoot : generatedRoot;
 
-  const [textParts, commands, tests, safety, models, ownership, playbooks, modules, workflows] = await Promise.all([
+  const [textParts, commands, tests, safety, models, ownership, playbooks, modules, workflows, generatedRepoMap] = await Promise.all([
     readRootTextFiles(fallbackRoot),
     readYamlIfExists(path.join(fallbackRoot, "commands.yaml")),
     readYamlIfExists(path.join(fallbackRoot, "tests.yaml")),
@@ -25,8 +25,11 @@ export async function loadRepoManifest(repoRoot: string): Promise<RepoManifest> 
     readYamlIfExists(path.join(fallbackRoot, "ownership.yaml")),
     loadPlaybooks(path.join(fallbackRoot, "playbooks")),
     loadModuleManifests(repoRoot),
-    loadWorkflowManifests(repoRoot)
+    loadWorkflowManifests(repoRoot),
+    hasRootManifest ? Promise.resolve(undefined) : readJsonIfExists(path.join(generatedRoot, "repo-map.json"))
   ]);
+  const defaultTestCommands = stringArray(tests?.default);
+  const generatedMetadata = parseGeneratedRepoMap(repoRoot, generatedRepoMap, defaultTestCommands);
 
   return {
     ...textParts,
@@ -36,10 +39,71 @@ export async function loadRepoManifest(repoRoot: string): Promise<RepoManifest> 
     models,
     ownership,
     playbooks,
-    modules,
-    workflows,
+    modules: modules.length > 0 ? modules : generatedMetadata.modules,
+    workflows: workflows.length > 0 ? workflows : generatedMetadata.workflows,
     generated: !hasRootManifest
   };
+}
+
+function parseGeneratedRepoMap(
+  repoRoot: string,
+  value: Record<string, unknown> | undefined,
+  defaultTestCommands: string[]
+): { modules: ModuleManifest[]; workflows: WorkflowManifest[] } {
+  if (!value) {
+    return { modules: [], workflows: [] };
+  }
+
+  const modules = objectArray(value.inferredModules).flatMap((candidate) => {
+    const root = optionalString(candidate.root);
+    if (!root) {
+      return [];
+    }
+    const name = stringValue(candidate.name, path.basename(root));
+    const evidence = stringArray(candidate.evidence);
+    return [
+      {
+        path: path.join(repoRoot, root, "module.yaml"),
+        generated: true,
+        name,
+        description: generatedDescription("module", candidate.confidence, evidence),
+        owners: [],
+        publicApi: stringArray(candidate.publicApiCandidates),
+        dependsOn: [],
+        usedBy: [],
+        testCommands: defaultTestCommands,
+        rules: []
+      }
+    ];
+  });
+
+  const workflows = objectArray(value.inferredWorkflows).flatMap((candidate) => {
+    const root = optionalString(candidate.root);
+    if (!root) {
+      return [];
+    }
+    const name = stringValue(candidate.name, path.basename(root));
+    const evidence = stringArray(candidate.evidence);
+    return [
+      {
+        path: path.join(repoRoot, root, "flow.yaml"),
+        generated: true,
+        name,
+        description: generatedDescription("workflow", candidate.confidence, evidence),
+        steps: [],
+        touches: stringArray(candidate.touches),
+        testCommands: defaultTestCommands,
+        risks: []
+      }
+    ];
+  });
+
+  return { modules, workflows };
+}
+
+function generatedDescription(kind: string, confidence: unknown, evidence: string[]): string {
+  const confidenceText = typeof confidence === "string" ? confidence : "unknown";
+  return `Generated ${kind} candidate (${confidenceText} confidence)${evidence.length ? `: ${evidence.join("; ")}` : "."}`;
 }
 
 async function hasOfficialRootManifest(aiRoot: string): Promise<boolean> {
@@ -174,6 +238,15 @@ async function readYamlIfExists(filePath: string): Promise<Record<string, unknow
   return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
 }
 
+async function readJsonIfExists(filePath: string): Promise<Record<string, unknown> | undefined> {
+  const content = await readTextIfExists(filePath);
+  if (content === undefined) {
+    return undefined;
+  }
+  const parsed = JSON.parse(content) as unknown;
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
+}
+
 async function readTextIfExists(filePath: string): Promise<string | undefined> {
   try {
     return await fs.readFile(filePath, "utf8");
@@ -211,4 +284,10 @@ function optionalString(value: unknown): string | undefined {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function objectArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
 }

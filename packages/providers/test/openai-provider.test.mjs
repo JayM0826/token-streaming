@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createModelProvider } from "../dist/factory.js";
 import { OpenAIResponsesProvider } from "../dist/openai-provider.js";
 
 test("OpenAIResponsesProvider sends a bounded Responses API request", async () => {
@@ -45,6 +46,65 @@ test("OpenAIResponsesProvider sends a bounded Responses API request", async () =
     reasoning: { effort: "low" },
     max_output_tokens: 16
   });
+});
+
+test("createModelProvider passes custom OpenAI-compatible base URL from options", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return jsonResponse({ output_text: "ok" });
+  };
+
+  try {
+    const provider = createModelProvider({
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-test",
+      baseUrl: "https://relay.example/v1"
+    });
+
+    await provider.generate({
+      mode: "auto",
+      messages: [{ role: "user", content: "hello" }]
+    });
+
+    assert.equal(calls[0].url, "https://relay.example/v1/responses");
+    assert.equal(calls[0].init.headers.Authorization, "Bearer sk-test");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createModelProvider selects the chat completions relay protocol", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return jsonResponse({ choices: [{ message: { content: "ok" } }] });
+  };
+
+  try {
+    const provider = createModelProvider({
+      provider: "openai",
+      apiKey: "relay-key",
+      model: "relay-model",
+      baseUrl: "https://relay.example/v1",
+      apiProtocol: "chat-completions"
+    });
+
+    await provider.generate({ mode: "auto", messages: [{ role: "user", content: "hello" }] });
+    assert.equal(calls[0].url, "https://relay.example/v1/chat/completions");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createModelProvider rejects unknown OpenAI API protocols", () => {
+  assert.throws(
+    () => createModelProvider({ provider: "openai", apiKey: "relay-key", apiProtocol: "legacy" }),
+    /Invalid OpenAI API protocol/
+  );
 });
 
 test("OpenAIResponsesProvider extracts text from output content arrays", async () => {

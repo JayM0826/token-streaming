@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Checkpoint } from "@token-streaming/protocol";
+import { assertSafeStorageId } from "./safe-id.js";
 
 export interface RollbackPreview {
   checkpointId: string;
@@ -23,7 +24,7 @@ export class CheckpointStore {
       files: await Promise.all(
         files.map(async (file) => ({
           path: file,
-          content: await readNullable(path.resolve(this.repoRoot, file))
+          content: await readNullable(await resolveInsideRepoReal(this.repoRoot, file))
         }))
       )
     };
@@ -72,7 +73,7 @@ export class CheckpointStore {
     const restored: string[] = [];
 
     for (const file of checkpoint.files) {
-      const absolutePath = path.resolve(this.repoRoot, file.path);
+      const absolutePath = await resolveInsideRepoReal(this.repoRoot, file.path);
       if (file.content === null) {
         await fs.rm(absolutePath, { force: true });
       } else {
@@ -102,6 +103,7 @@ export class CheckpointStore {
   }
 
   private getCheckpointPath(id: string): string {
+    assertSafeStorageId("checkpoint", id);
     return path.join(this.repoRoot, ".token-streaming", "checkpoints", `${id}.json`);
   }
 }
@@ -114,6 +116,45 @@ async function readNullable(filePath: string): Promise<string | null> {
       return null;
     }
     throw error;
+  }
+}
+
+function resolveInsideRepo(repoRoot: string, relativePath: string): string {
+  const root = path.resolve(repoRoot);
+  const resolved = path.resolve(root, relativePath);
+  if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
+    throw new Error(`Checkpoint path escapes repository root: ${relativePath}`);
+  }
+  return resolved;
+}
+
+async function resolveInsideRepoReal(repoRoot: string, relativePath: string): Promise<string> {
+  const resolved = resolveInsideRepo(repoRoot, relativePath);
+  const root = path.resolve(repoRoot);
+  const realRoot = await fs.realpath(root);
+  const existingAncestor = await findExistingAncestor(resolved, root);
+  const realAncestor = await fs.realpath(existingAncestor);
+  if (realAncestor !== realRoot && !realAncestor.startsWith(`${realRoot}${path.sep}`)) {
+    throw new Error(`Checkpoint path resolves outside repository root through a symbolic link: ${relativePath}`);
+  }
+  return resolved;
+}
+
+async function findExistingAncestor(candidate: string, root: string): Promise<string> {
+  let current = candidate;
+  while (true) {
+    try {
+      await fs.lstat(current);
+      return current;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+        throw error;
+      }
+    }
+    if (current === root) {
+      return root;
+    }
+    current = path.dirname(current);
   }
 }
 
