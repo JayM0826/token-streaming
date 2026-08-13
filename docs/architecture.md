@@ -229,7 +229,7 @@ Model selection is policy-driven but still user-overridable.
 - Provider routing remains separate from strategy execution so cost/effectiveness choices can evolve independently from orchestration.
 - `models select [task...]` previews routing without calling a provider and can explain task-specific feedback matches.
 - `models select --json` exposes routing decisions, inferred task kind, candidate feedback, and telemetry recommendations as structured data for cost/effectiveness UI and automation.
-- `doctor models` validates selection and provider readiness without network calls unless `--probe` is passed. Probe requests use the selected provider/model, low reasoning effort, a small output cap, request timeout handling, and structured error reporting for JSON and non-JSON upstream failures.
+- `doctor models` validates selection and provider readiness without network calls unless `--probe` is passed. Probe requests use the selected provider/model, low reasoning effort, a small output cap, request timeout handling, safe nested transport diagnostics, one retry for transient connection failures, and structured error reporting for JSON and non-JSON upstream failures.
 - `doctor models --json` exposes readiness checks, skipped/warning/error counts, selected model, and effective provider for CI, automation, and future desktop status panels.
 - `pnpm smoke:openai` is the explicit live smoke entry point. It requires `OPENAI_API_KEY` and runs `doctor models --probe --json` with `--provider openai` through the built CLI.
 

@@ -1,4 +1,5 @@
 import type { ModelMessage, ModelProvider, ModelRequest, ModelResponse } from "@token-streaming/protocol";
+import { formatProviderNetworkError } from "./network-error.js";
 
 export interface OpenAIResponsesProviderOptions {
   apiKey: string;
@@ -68,7 +69,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
       if (isAbortError(error)) {
         throw new Error(`OpenAI request timed out after ${this.timeoutMs}ms.`);
       }
-      throw error;
+      throw formatProviderNetworkError("OpenAI network request failed", error);
     } finally {
       clearTimeout(timeout);
     }

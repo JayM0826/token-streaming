@@ -7,6 +7,7 @@ import {
   type ProviderName
 } from "./factory.js";
 import { resolveModelSelection, type ModelSelection } from "./model-policy.js";
+import { isTransientProviderNetworkError } from "./network-error.js";
 
 export interface ModelDoctorOptions {
   mode: ProductMode;
@@ -117,38 +118,45 @@ async function runProbe(
   apiProtocol: OpenAIApiProtocol,
   timeoutMs: number
 ): Promise<ModelDoctorCheck> {
-  try {
-    const provider = createModelProvider({
-      provider: selection.provider,
-      model: selection.model,
-      apiKey,
-      baseUrl,
-      apiProtocol,
-      timeoutMs
-    });
-    const response = await provider.generate({
-      mode: "auto",
-      reasoningEffort: "low",
-      maxOutputTokens: 16,
-      messages: [
-        {
-          role: "user",
-          content: "Respond with the word ok."
-        }
-      ]
-    });
-    return {
-      name: "probe",
-      status: response.content.trim() ? "ok" : "warning",
-      message: `Probe completed with provider=${response.provider ?? provider.name}, model=${response.model ?? "unknown"}.`
-    };
-  } catch (error) {
-    return {
-      name: "probe",
-      status: "error",
-      message: error instanceof Error ? error.message : String(error)
-    };
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const provider = createModelProvider({
+        provider: selection.provider,
+        model: selection.model,
+        apiKey,
+        baseUrl,
+        apiProtocol,
+        timeoutMs
+      });
+      const response = await provider.generate({
+        mode: "auto",
+        reasoningEffort: "low",
+        maxOutputTokens: 16,
+        messages: [
+          {
+            role: "user",
+            content: "Respond with the word ok."
+          }
+        ]
+      });
+      return {
+        name: "probe",
+        status: response.content.trim() ? "ok" : "warning",
+        message: `Probe completed with provider=${response.provider ?? provider.name}, model=${response.model ?? "unknown"}, attempts=${attempt}.`
+      };
+    } catch (error) {
+      if (attempt === 1 && isTransientProviderNetworkError(error)) {
+        continue;
+      }
+      return {
+        name: "probe",
+        status: "error",
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
   }
+
+  throw new Error("Unreachable probe state.");
 }
 
 function formatEndpoint(baseUrl: string | undefined, protocol: OpenAIApiProtocol): string {

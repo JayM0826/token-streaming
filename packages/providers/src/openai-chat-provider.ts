@@ -1,4 +1,5 @@
 import type { ModelMessage, ModelProvider, ModelRequest, ModelResponse } from "@token-streaming/protocol";
+import { formatProviderNetworkError } from "./network-error.js";
 
 export interface OpenAIChatCompletionsProviderOptions {
   apiKey: string;
@@ -62,7 +63,7 @@ export class OpenAIChatCompletionsProvider implements ModelProvider {
       if (isAbortError(error)) {
         throw new Error(`OpenAI-compatible chat request timed out after ${this.timeoutMs}ms.`);
       }
-      throw error;
+      throw formatProviderNetworkError("OpenAI-compatible chat network request failed", error);
     } finally {
       clearTimeout(timeout);
     }

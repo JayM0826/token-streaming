@@ -98,3 +98,58 @@ test("diagnoseModelProvider reports the chat completions relay endpoint", async 
     true
   );
 });
+
+test("diagnoseModelProvider retries one transient transport failure", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      const cause = new Error("socket disconnected");
+      cause.code = "ECONNRESET";
+      throw new TypeError("fetch failed", { cause });
+    }
+    return new Response(JSON.stringify({ output_text: "ok" }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    const result = await diagnoseModelProvider({
+      mode: "auto",
+      requestedProvider: "openai",
+      requestedModel: "gpt-test",
+      apiKey: "sk-test",
+      probe: true
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(calls, 2);
+    assert.equal(result.checks.find((check) => check.name === "probe")?.message.includes("attempts=2"), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("diagnoseModelProvider does not retry HTTP failures", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ error: { message: "invalid key" } }), { status: 401, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    const result = await diagnoseModelProvider({
+      mode: "auto",
+      requestedProvider: "openai",
+      requestedModel: "gpt-test",
+      apiKey: "sk-test",
+      probe: true
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(calls, 1);
+    assert.equal(result.checks.find((check) => check.name === "probe")?.message, "invalid key");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

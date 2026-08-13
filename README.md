@@ -165,7 +165,7 @@ Provider behavior:
 - `doctor repo --json` exposes the same health data for automation and future desktop hosts.
 - `doctor models` checks model policy and provider readiness without sending network requests by default.
 - `doctor models --json` exposes model readiness checks, skipped/warning/error counts, selected model, and effective provider.
-- `doctor models --probe` sends a minimal provider request with low reasoning effort, a small output cap, timeout handling, and structured upstream error reporting.
+- `doctor models --probe` sends a minimal provider request with low reasoning effort, a small output cap, timeout handling, safe transport diagnostics, and one retry for transient connection failures.
 - `pnpm smoke:openai` requires `OPENAI_API_KEY` and runs the real OpenAI probe path through the built CLI.
 - To test a third-party OpenAI-compatible relay, set both environment variables before probing:
 

@@ -83,6 +83,26 @@ test("OpenAIChatCompletionsProvider times out slow requests", async () => {
   );
 });
 
+test("OpenAIChatCompletionsProvider exposes safe transport diagnostics", async () => {
+  const provider = new OpenAIChatCompletionsProvider({
+    apiKey: "secret-value",
+    fetch: async () => {
+      const cause = new Error("socket disconnected");
+      cause.code = "ECONNRESET";
+      throw new TypeError("fetch failed", { cause });
+    }
+  });
+
+  await assert.rejects(
+    () => provider.generate({ mode: "auto", messages: [{ role: "user", content: "hello" }] }),
+    (error) => {
+      assert.match(error.message, /OpenAI-compatible chat network request failed: fetch failed: ECONNRESET socket disconnected/);
+      assert.doesNotMatch(error.message, /secret-value/);
+      return true;
+    }
+  );
+});
+
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
