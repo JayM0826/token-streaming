@@ -10,9 +10,9 @@ pnpm acceptance:check -- --json
 
 ## 当前结论
 
-- V1 `7.1` 的 22 项必须能力：21 项已证明完成，1 项等待外部商业 API 成功响应，完成度 95.5%。
+- V1 `7.1` 的 22 项必须能力：22/22 已证明完成，完成度 100%。
 - V1 `9` 的 13 条行为验收：13/13 已由本地行为测试证明。
-- 完整开发 Prompt 的 15 个模块组：实现均已落地；其中 Model Providers 的代码、模拟中转和错误路径已通过，真实中转成功响应仍待最终验收。
+- 完整开发 Prompt 的 15 个模块组：实现均已落地；Model Providers 的代码、模拟中转、错误路径及真实商业中转均已通过验收。
 - 明确非目标仍保持未实现：Desktop App、多套生产策略、分布式 Agent、向量数据库、企业权限后台、插件市场、云同步。
 - 最新本地质量证据：197/197 tests、lint、7 个包发布检查、7 个包加 CLI/headless core 隔离安装均通过。
 
@@ -38,7 +38,7 @@ pnpm acceptance:check -- --json
 | 16 | Run Report | 完成 | 成功、运行失败、初始化失败、权限、工具、review 和变更报告测试 |
 | 17 | Model Provider interface | 完成 | protocol contract 与 provider factory |
 | 18 | Stub provider | 完成 | 确定性单测及权威验收中的真实端到端 stub smoke |
-| 19 | OpenAI provider adapter | 实现完成，外部验收待完成 | Responses/Chat Completions、模拟中转、超时、重试、脱敏 HTTP/网络诊断均通过；真实中转尚未返回成功内容 |
+| 19 | OpenAI provider adapter | 完成 | Responses/Chat Completions、模拟中转、超时、重试、脱敏 HTTP/网络诊断均通过；WellAU + `gpt-5.5` 的 Chat Completions 真实中转验收通过 |
 | 20 | Strategy extension point | 完成 | `OrchestrationStrategy`、registry、注入 custom strategy 测试 |
 | 21 | Mode extension point | 完成 | economy/max/auto 类型、上下文/推理/验证/review 最小差异测试 |
 | 22 | Module/workflow manifests | 完成 | 7 个模块均有 README + `module.yaml`，workflow 有 README + `flow.yaml` |
@@ -67,14 +67,14 @@ packed install: 7 packages + CLI + headless core passed
 manifest validation: 0 errors, 0 warnings
 stub smoke: provider=stub, strategy=default, review/event-log/report verified
 repository doctor: passed offline
-commercial live smoke: pending successful upstream response
+commercial live smoke: verified with WellAU, gpt-5.5, chat-completions
 ```
 
-## 唯一剩余条件
+## 商业中转验收
 
-第三方中转配置已被证明能正确同步到验收子进程。无凭据复核确认 `/v1/models`、`/v1/responses` 和 `/v1/chat/completions` 当前均可达，并按预期返回 `401 API_KEY_REQUIRED`，因此 DNS、TLS 和网关路由不是阻塞项。此前真实 `/v1/responses` 请求到达中转站，但返回 `Upstream request failed`；离线门禁保持全绿，临时凭据已安全清除。当前代码已经兼容嵌套及顶层错误格式，保留 HTTP status、上游 type/code/request ID，并对正文限长、对 API key 脱敏，因此下一次调用可以明确区分模型权限、账号、协议兼容和中转上游故障。
+2026-08-14 使用 `https://api.wellau.com/v1` 和账户实际列出的 `gpt-5.5` 完成真实验收：鉴权 `/models` 返回 HTTP 200 且精确包含目标模型。Responses 探测正确诊断出中转站自身的 `HTTP 400 upstream_error: unknown provider for model gpt-5.5`，随后按 provider 已实现的兼容能力切换到 Chat Completions，完整权威门禁进程成功退出。根据 `scripts/check-acceptance.mjs` 的退出条件，这同时证明 `offlineOk === true` 且 `liveSmoke.verified === true`；该轮仍包含 lint、197 项测试、包就绪、隔离安装、manifest、stub smoke 和 repository doctor，而不是仅运行网络探针。
 
-最终完成条件是一次完整门禁返回：
+最终完成证据满足：
 
 ```json
 {
@@ -87,4 +87,4 @@ commercial live smoke: pending successful upstream response
 }
 ```
 
-在该证据出现前，本项目不声明 V1 全部完成。
+WellAU 当前应使用 `OPENAI_API_PROTOCOL=chat-completions`；其 Responses 路由限制属于中转站配置，不是本项目 adapter 缺陷。验收完成后五项临时 User/Process 环境变量及桌面同步脚本均已清除。

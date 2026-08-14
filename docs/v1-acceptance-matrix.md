@@ -33,7 +33,7 @@ Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after
 | Run Report | Complete | success, runtime failure and initialization failure report tests |
 | Model Provider interface | Complete | protocol contract in `@token-streaming/protocol` |
 | Stub provider | Complete | deterministic offline runtime and CLI tests plus an explicit end-to-end acceptance smoke with review/event-log/report evidence |
-| OpenAI provider adapter | Complete, live pending | Responses and Chat Completions adapters; mock HTTP probe passes; bounded and key-redacted HTTP/transport diagnostics; external probe needs a key |
+| OpenAI provider adapter | Complete | Responses and Chat Completions adapters; mock HTTP probes; bounded and key-redacted diagnostics; live WellAU `gpt-5.5` Chat Completions acceptance passed |
 | Strategy extension point | Complete | registry and injected custom-strategy tests |
 | Mode extension point | Complete | economy low-reasoning/light-context/light-verification, auto risk review, and max high-reasoning/required-review tests |
 | Module/workflow manifests | Complete | every maintained module has `README.md` plus `module.yaml`; workflows have `README.md` plus `flow.yaml`; loader, validator, context and strategy selection tests |
@@ -79,3 +79,5 @@ pnpm acceptance:check -- --json
 ```
 
 For a relay, set `OPENAI_MODEL` to its exposed model name and raise `OPENAI_TIMEOUT_MS` if generation can exceed 30 seconds. If it only supports Chat Completions, also use `OPENAI_API_PROTOCOL=chat-completions`.
+
+The 2026-08-14 commercial acceptance used WellAU with `gpt-5.5`. Its model catalog exposed that exact name, but its Responses route returned `unknown provider for model gpt-5.5`; the complete gate passed after selecting `OPENAI_API_PROTOCOL=chat-completions`. This relay-specific route limitation does not affect the independently tested Responses adapter.
