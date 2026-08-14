@@ -31,7 +31,7 @@ Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after
 | Run Report | Complete | success, runtime failure and initialization failure report tests |
 | Model Provider interface | Complete | protocol contract in `@token-streaming/protocol` |
 | Stub provider | Complete | deterministic offline runtime and CLI tests |
-| OpenAI provider adapter | Complete, live pending | Responses and Chat Completions adapters; mock HTTP probe passes; external probe needs a key |
+| OpenAI provider adapter | Complete, live pending | Responses and Chat Completions adapters; mock HTTP probe passes; bounded and key-redacted HTTP/transport diagnostics; external probe needs a key |
 | Strategy extension point | Complete | registry and injected custom-strategy tests |
 | Mode extension point | Complete | economy low-reasoning/light-context/light-verification, auto risk review, and max high-reasoning/required-review tests |
 | Module/workflow manifests | Complete | loader, validator, context and strategy selection tests |

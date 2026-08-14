@@ -1,4 +1,5 @@
 import type { ModelMessage, ModelProvider, ModelRequest, ModelResponse } from "@token-streaming/protocol";
+import { formatProviderHttpError } from "./http-error.js";
 import { formatProviderNetworkError } from "./network-error.js";
 
 export interface OpenAIResponsesProviderOptions {
@@ -76,7 +77,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
 
     const body = await readResponseBody(response);
     if (!response.ok) {
-      throw new Error(body.error?.message ?? `OpenAI request failed with HTTP ${response.status}`);
+      throw formatProviderHttpError("OpenAI request failed", response, body, [this.apiKey]);
     }
 
     return {
@@ -127,7 +128,7 @@ async function readResponseBody(response: Response): Promise<OpenAIResponsesBody
     }
     return {
       error: {
-        message: `OpenAI request failed with HTTP ${response.status}: ${text.slice(0, 500)}`
+        message: text
       }
     };
   }

@@ -1,4 +1,5 @@
 import type { ModelMessage, ModelProvider, ModelRequest, ModelResponse } from "@token-streaming/protocol";
+import { formatProviderHttpError } from "./http-error.js";
 import { formatProviderNetworkError } from "./network-error.js";
 
 export interface OpenAIChatCompletionsProviderOptions {
@@ -70,7 +71,7 @@ export class OpenAIChatCompletionsProvider implements ModelProvider {
 
     const body = await readResponseBody(response);
     if (!response.ok) {
-      throw new Error(body.error?.message ?? `OpenAI-compatible chat request failed with HTTP ${response.status}`);
+      throw formatProviderHttpError("OpenAI-compatible chat request failed", response, body, [this.apiKey]);
     }
 
     return {
@@ -121,7 +122,7 @@ async function readResponseBody(response: Response): Promise<ChatCompletionBody>
     }
     return {
       error: {
-        message: `OpenAI-compatible chat request failed with HTTP ${response.status}: ${text.slice(0, 500)}`
+        message: text
       }
     };
   }

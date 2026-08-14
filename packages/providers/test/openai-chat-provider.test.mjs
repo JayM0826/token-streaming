@@ -59,11 +59,11 @@ test("OpenAIChatCompletionsProvider extracts array content and reports upstream 
 
   const errorProvider = new OpenAIChatCompletionsProvider({
     apiKey: "relay-key",
-    fetch: async () => jsonResponse({ error: { message: "unknown relay model" } }, 400)
+    fetch: async () => jsonResponse({ error: { message: "unknown relay model", code: "model_not_found" } }, 400)
   });
   await assert.rejects(
     () => errorProvider.generate({ mode: "auto", messages: [{ role: "user", content: "hello" }] }),
-    /unknown relay model/
+    /OpenAI-compatible chat request failed with HTTP 400 \(code=model_not_found\): unknown relay model/
   );
 });
 

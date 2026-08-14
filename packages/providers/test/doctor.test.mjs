@@ -148,7 +148,7 @@ test("diagnoseModelProvider does not retry HTTP failures", async () => {
 
     assert.equal(result.ok, false);
     assert.equal(calls, 1);
-    assert.equal(result.checks.find((check) => check.name === "probe")?.message, "invalid key");
+    assert.equal(result.checks.find((check) => check.name === "probe")?.message, "OpenAI request failed with HTTP 401: invalid key");
   } finally {
     globalThis.fetch = originalFetch;
   }

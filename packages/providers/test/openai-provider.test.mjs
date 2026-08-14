@@ -171,19 +171,32 @@ test("OpenAIResponsesProvider extracts text from output content arrays", async (
 
 test("OpenAIResponsesProvider reports JSON and text error responses", async () => {
   const jsonProvider = new OpenAIResponsesProvider({
-    apiKey: "sk-test",
+    apiKey: "secret-value",
     fetch: async () =>
       jsonResponse(
         {
           error: {
-            message: "invalid model"
+            message: "invalid model for secret-value",
+            type: "invalid_request_error",
+            code: "model_not_found"
           }
         },
-        400
+        400,
+        { "x-request-id": "req-test" }
       )
   });
 
-  await assert.rejects(() => jsonProvider.generate({ mode: "auto", messages: [{ role: "user", content: "hello" }] }), /invalid model/);
+  await assert.rejects(
+    () => jsonProvider.generate({ mode: "auto", messages: [{ role: "user", content: "hello" }] }),
+    (error) => {
+      assert.match(
+        error.message,
+        /OpenAI request failed with HTTP 400 \(type=invalid_request_error, code=model_not_found, request_id=req-test\): invalid model for \[REDACTED\]/
+      );
+      assert.doesNotMatch(error.message, /secret-value/);
+      return true;
+    }
+  );
 
   const textProvider = new OpenAIResponsesProvider({
     apiKey: "sk-test",
@@ -232,11 +245,12 @@ test("OpenAIResponsesProvider exposes safe nested transport diagnostics", async 
   );
 });
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
-      "content-type": "application/json"
+      "content-type": "application/json",
+      ...headers
     }
   });
 }
