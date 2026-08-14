@@ -72,7 +72,7 @@ commercial live smoke: pending successful upstream response
 
 ## 唯一剩余条件
 
-第三方中转配置已被证明能正确同步到验收子进程。此前真实 `/v1/responses` 请求到达中转站，但返回 `Upstream request failed`；离线门禁保持全绿，临时凭据已安全清除。当前代码已经保留 HTTP status、上游 type/code/request ID，并对正文限长、对 API key 脱敏，因此下一次调用可以明确区分模型权限、账号、协议兼容和中转上游故障。
+第三方中转配置已被证明能正确同步到验收子进程。无凭据复核确认 `/v1/models`、`/v1/responses` 和 `/v1/chat/completions` 当前均可达，并按预期返回 `401 API_KEY_REQUIRED`，因此 DNS、TLS 和网关路由不是阻塞项。此前真实 `/v1/responses` 请求到达中转站，但返回 `Upstream request failed`；离线门禁保持全绿，临时凭据已安全清除。当前代码已经兼容嵌套及顶层错误格式，保留 HTTP status、上游 type/code/request ID，并对正文限长、对 API key 脱敏，因此下一次调用可以明确区分模型权限、账号、协议兼容和中转上游故障。
 
 最终完成条件是一次完整门禁返回：
 

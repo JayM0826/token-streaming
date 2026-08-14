@@ -207,6 +207,16 @@ test("OpenAIResponsesProvider reports JSON and text error responses", async () =
     () => textProvider.generate({ mode: "auto", messages: [{ role: "user", content: "hello" }] }),
     /OpenAI request failed with HTTP 503: upstream unavailable/
   );
+
+  const rootErrorProvider = new OpenAIResponsesProvider({
+    apiKey: "sk-test",
+    fetch: async () => jsonResponse({ code: "API_KEY_REQUIRED", message: "API key is required" }, 401)
+  });
+
+  await assert.rejects(
+    () => rootErrorProvider.generate({ mode: "auto", messages: [{ role: "user", content: "hello" }] }),
+    /OpenAI request failed with HTTP 401 \(code=API_KEY_REQUIRED\): API key is required/
+  );
 });
 
 test("OpenAIResponsesProvider times out slow requests", async () => {

@@ -26,11 +26,18 @@ function extractErrorPayload(body: unknown): ErrorPayload | undefined {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return undefined;
   }
-  const error = (body as Record<string, unknown>).error;
-  if (!error || typeof error !== "object" || Array.isArray(error)) {
-    return undefined;
+  const record = body as Record<string, unknown>;
+  const error = record.error;
+  if (error && typeof error === "object" && !Array.isArray(error)) {
+    return error as ErrorPayload;
   }
-  return error as ErrorPayload;
+  if (typeof error === "string") {
+    return { message: error, type: record.type, code: record.code };
+  }
+  if (record.message !== undefined || record.type !== undefined || record.code !== undefined) {
+    return { message: record.message, type: record.type, code: record.code };
+  }
+  return undefined;
 }
 
 function formatMetadata(name: string, value: unknown, sensitiveValues: readonly string[]): string | undefined {
