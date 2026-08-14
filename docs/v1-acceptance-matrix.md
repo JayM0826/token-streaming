@@ -8,7 +8,7 @@ The authoritative final gate is:
 pnpm acceptance:check -- --json
 ```
 
-Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after all offline checks pass, including a deterministic end-to-end stub provider smoke that proves run, review, event-log, and report creation. With a key, it performs its own live provider probe and only succeeds when that probe is verified.
+Without a configured commercial provider key, the gate intentionally reports `missing-api-key` after all offline checks pass, including a deterministic end-to-end stub provider smoke that proves run, review, event-log, and report creation. With an OpenAI, Anthropic, or Gemini key, it performs its own live provider probe and only succeeds when that probe is verified. `--provider` selects the provider explicitly.
 
 ## Required Capabilities
 
@@ -34,6 +34,8 @@ Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after
 | Model Provider interface | Complete | protocol contract in `@token-streaming/protocol` |
 | Stub provider | Complete | deterministic offline runtime and CLI tests plus an explicit end-to-end acceptance smoke with review/event-log/report evidence |
 | OpenAI provider adapter | Complete | Responses and Chat Completions adapters; mock HTTP probes; bounded and key-redacted diagnostics; live WellAU `gpt-5.5` Chat Completions acceptance passed |
+| Anthropic provider adapter | Complete | native Messages request/response translation, native auth/version headers, mock HTTP probe, timeout/retry diagnostics, usage extraction, and key redaction tests |
+| Gemini provider adapter | Complete | stable native Interactions request/response translation, native auth header, mock HTTP probe, timeout/retry diagnostics, usage extraction, and key redaction tests |
 | Strategy extension point | Complete | registry and injected custom-strategy tests |
 | Mode extension point | Complete | economy low-reasoning/light-context/light-verification, auto risk review, and max high-reasoning/required-review tests |
 | Module/workflow manifests | Complete | every maintained module has `README.md` plus `module.yaml`; workflows have `README.md` plus `flow.yaml`; loader, validator, context and strategy selection tests |
@@ -76,6 +78,18 @@ export OPENAI_API_PROTOCOL="responses"
 export OPENAI_MODEL="gpt-5.5"
 export OPENAI_TIMEOUT_MS="120000"
 pnpm acceptance:check -- --json
+```
+
+Or select a native provider explicitly:
+
+```bash
+export ANTHROPIC_API_KEY="..."
+export ANTHROPIC_MODEL="claude-sonnet-5"
+pnpm acceptance:check -- --provider anthropic --json
+
+export GEMINI_API_KEY="..."
+export GEMINI_MODEL="gemini-3.6-flash"
+pnpm acceptance:check -- --provider gemini --json
 ```
 
 For a relay, set `OPENAI_MODEL` to its exposed model name and raise `OPENAI_TIMEOUT_MS` if generation can exceed 30 seconds. If it only supports Chat Completions, also use `OPENAI_API_PROTOCOL=chat-completions`.

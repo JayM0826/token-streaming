@@ -3,8 +3,8 @@ interface ErrorWithCause extends Error {
   code?: unknown;
 }
 
-export function formatProviderNetworkError(prefix: string, error: unknown): Error {
-  const details = collectErrorDetails(error);
+export function formatProviderNetworkError(prefix: string, error: unknown, sensitiveValues: readonly string[] = []): Error {
+  const details = collectErrorDetails(error, sensitiveValues);
   return new Error(`${prefix}: ${details.join(": ")}`, { cause: error });
 }
 
@@ -15,14 +15,14 @@ export function isTransientProviderNetworkError(error: unknown): boolean {
   );
 }
 
-function collectErrorDetails(error: unknown): string[] {
+function collectErrorDetails(error: unknown, sensitiveValues: readonly string[]): string[] {
   const details: string[] = [];
   let current: unknown = error;
   const visited = new Set<unknown>();
   while (isErrorLike(current) && !visited.has(current)) {
     visited.add(current);
     const code = typeof current.code === "string" ? current.code : undefined;
-    const message = current.message.trim();
+    const message = sanitizeText(current.message, sensitiveValues);
     const detail = [code, message].filter(Boolean).join(" ");
     if (detail && !details.includes(detail)) {
       details.push(detail);
@@ -30,6 +30,16 @@ function collectErrorDetails(error: unknown): string[] {
     current = current.cause;
   }
   return details.length ? details : ["unknown network error"];
+}
+
+function sanitizeText(value: string, sensitiveValues: readonly string[]): string {
+  let sanitized = value.trim();
+  for (const secret of sensitiveValues) {
+    if (secret) {
+      sanitized = sanitized.replaceAll(secret, "[REDACTED]");
+    }
+  }
+  return sanitized;
 }
 
 function collectErrorCodes(error: unknown): string[] {

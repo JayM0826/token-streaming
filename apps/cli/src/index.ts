@@ -25,9 +25,13 @@ import {
   type ApprovalHost
 } from "@token-streaming/core";
 import {
+  availableProviderNames,
   createModelProvider,
   diagnoseModelProvider,
+  resolveEnvironmentModel,
   resolveModelSelection,
+  resolveProviderConfig,
+  type CommercialProviderName,
   type ModelDoctorResult,
   type OpenAIApiProtocol,
   type ProviderName
@@ -142,14 +146,14 @@ interface HistoryPruneCandidates {
 }
 
 interface LiveSmokeReadiness {
-  provider: "openai";
+  provider: CommercialProviderName;
   command: string;
   status: "missing-api-key" | "ready" | "verified" | "failed";
   verified: boolean;
   requiredEnv: string[];
   optionalEnv: string[];
   baseUrl: string;
-  apiProtocol: OpenAIApiProtocol;
+  apiProtocol?: OpenAIApiProtocol;
   model?: string;
   timeoutMs: number;
   endpoint: string;
@@ -334,8 +338,9 @@ async function main(): Promise<void> {
     mode: args.mode,
     requestedProvider: args.provider,
     requestedModel: args.model,
-    environmentModel: process.env.OPENAI_MODEL,
+    environmentModel: resolveEnvironmentModel(providerHint(args, manifest)),
     manifest,
+    availableProviders: availableProviderNames(),
     telemetry: await new TelemetryStore(args.cwd).summarizeModelCalls(),
     task: args.task
   });
@@ -842,10 +847,10 @@ function parseStrategy(value: string): StrategyId {
 }
 
 function parseProvider(value: string): ProviderName {
-  if (value === "stub" || value === "openai" || value === "auto") {
+  if (value === "stub" || value === "openai" || value === "anthropic" || value === "gemini" || value === "auto") {
     return value;
   }
-  throw new Error(`Invalid provider "${value}". Use stub, openai, or auto.`);
+  throw new Error(`Invalid provider "${value}". Use auto, openai, anthropic, gemini, or stub.`);
 }
 
 function parseApiProtocol(value: string): OpenAIApiProtocol {
@@ -905,7 +910,7 @@ Options:
   -C, --cwd <path>       Repository root
   --mode <mode>          Product mode: economy, max, auto
   --strategy <id>        Orchestration strategy id, default: default
-  --provider <provider>  Provider: auto, openai, stub
+  --provider <provider>  Provider: auto, openai, anthropic, gemini, stub
   --api-protocol <type>  OpenAI endpoint: responses, chat-completions
   --model <model>        Model name for the selected provider
   --patch-file <path>    Load a structured patch proposal from a JSON file
@@ -1614,8 +1619,14 @@ async function printConfigInspection(args: ParsedArgs): Promise<void> {
     mode: args.mode,
     requestedProvider: args.provider,
     requestedModel: args.model,
-    environmentModel: process.env.OPENAI_MODEL,
-    manifest
+    environmentModel: resolveEnvironmentModel(providerHint(args, manifest)),
+    manifest,
+    availableProviders: availableProviderNames()
+  });
+  const providerConfig = resolveProviderConfig({
+    provider: modelSelection.provider,
+    model: modelSelection.model,
+    apiProtocol: args.apiProtocol
   });
   const safety = summarizeSafetyPolicy(manifest.safety);
   const config = {
@@ -1626,10 +1637,11 @@ async function printConfigInspection(args: ParsedArgs): Promise<void> {
     strategyAvailable: strategies.includes(args.strategy),
     availableStrategies: strategies,
     provider: args.provider,
-    apiProtocol: args.apiProtocol ?? parseApiProtocol(process.env.OPENAI_API_PROTOCOL || "responses"),
+    ...(args.apiProtocol || providerConfig.apiProtocol ? { apiProtocol: args.apiProtocol ?? providerConfig.apiProtocol } : {}),
     requestedModel: args.model,
     modelSelection,
-    effectiveProvider: resolveEffectiveProvider(modelSelection.provider),
+    effectiveProvider: providerConfig.provider,
+    providerConnection: publicProviderConnection(providerConfig),
     repo: summarizeRepo(repo),
     manifest: summarizeManifest(manifest),
     safety
@@ -1645,7 +1657,11 @@ async function printConfigInspection(args: ParsedArgs): Promise<void> {
   console.log(`Mode: ${args.mode}`);
   console.log(`Strategy: ${args.strategy} (${config.strategyAvailable ? "available" : "missing"})`);
   console.log(`Provider: ${args.provider}`);
-  console.log(`OpenAI API protocol: ${config.apiProtocol}`);
+  if (config.apiProtocol) {
+    console.log(`OpenAI API protocol: ${config.apiProtocol}`);
+  }
+  console.log(`Effective provider: ${config.effectiveProvider}`);
+  console.log(`Provider endpoint: ${providerConfig.endpoint ?? "local stub"}`);
   console.log(`Model selection: provider=${modelSelection.provider}, model=${modelSelection.model ?? "provider default"}, source=${modelSelection.source}`);
   console.log(`Manifest source: ${manifest.generated ? ".ai/generated or inferred" : ".ai"}`);
   console.log(`Modules: ${manifest.modules.length}`);
@@ -2359,14 +2375,34 @@ function summarizeSafetyPolicy(safety: Record<string, unknown> | undefined): Rec
   };
 }
 
-function resolveEffectiveProvider(provider: ProviderName): "stub" | "openai" {
-  if (provider === "openai") {
-    return "openai";
+function providerHint(args: Pick<ParsedArgs, "provider">, manifest: Awaited<ReturnType<typeof loadRepoManifest>>): ProviderName {
+  if (args.provider !== "auto") {
+    return args.provider;
   }
-  if (provider === "stub") {
-    return "stub";
+  const manifestProvider = manifest.models?.default_provider;
+  if (
+    manifestProvider === "stub" ||
+    manifestProvider === "openai" ||
+    manifestProvider === "anthropic" ||
+    manifestProvider === "gemini"
+  ) {
+    return manifestProvider;
   }
-  return process.env.OPENAI_API_KEY ? "openai" : "stub";
+  return "auto";
+}
+
+function publicProviderConnection(config: ReturnType<typeof resolveProviderConfig>): Record<string, unknown> {
+  return {
+    provider: config.provider,
+    hasApiKey: Boolean(config.apiKey),
+    ...(config.apiKeyEnv ? { apiKeyEnv: config.apiKeyEnv } : {}),
+    ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+    ...(config.endpoint ? { endpoint: config.endpoint } : {}),
+    ...(config.apiProtocol ? { apiProtocol: config.apiProtocol } : {}),
+    ...(config.model ? { model: config.model } : {}),
+    timeoutMs: config.timeoutMs,
+    optionalEnv: config.optionalEnv
+  };
 }
 
 function parseToolJsonInput(raw: string): Record<string, unknown> {
@@ -2562,8 +2598,9 @@ async function printModelSelection(args: ParsedArgs, manifest: Awaited<ReturnTyp
     mode: args.mode,
     requestedProvider: args.provider,
     requestedModel: args.model,
-    environmentModel: process.env.OPENAI_MODEL,
+    environmentModel: resolveEnvironmentModel(providerHint(args, manifest)),
     manifest,
+    availableProviders: availableProviderNames(),
     telemetry,
     task: args.task
   });
@@ -2631,7 +2668,6 @@ async function printModelDoctor(repoRoot: string, args: ParsedArgs, manifest: Aw
     mode: args.mode,
     requestedProvider: args.provider,
     requestedModel: args.model,
-    environmentModel: process.env.OPENAI_MODEL,
     apiProtocol: args.apiProtocol,
     manifest,
     probe: args.probe
@@ -2645,11 +2681,12 @@ async function printModelDoctor(repoRoot: string, args: ParsedArgs, manifest: Aw
       request: {
         provider: args.provider,
         model: args.model,
-        apiProtocol: args.apiProtocol ?? process.env.OPENAI_API_PROTOCOL ?? "responses",
+        ...(args.apiProtocol || result.connection.apiProtocol ? { apiProtocol: args.apiProtocol ?? result.connection.apiProtocol } : {}),
         probe: args.probe
       },
       selection: result.selection,
       effectiveProvider: result.effectiveProvider,
+      connection: result.connection,
       counts: countModelDoctorChecks(result),
       checks: result.checks
     });
@@ -2673,7 +2710,6 @@ async function printRepoDoctor(args: ParsedArgs, manifest: Awaited<ReturnType<ty
       mode: args.mode,
       requestedProvider: args.provider,
       requestedModel: args.model,
-      environmentModel: process.env.OPENAI_MODEL,
       apiProtocol: args.apiProtocol,
       manifest,
       probe: args.probe
@@ -2711,6 +2747,7 @@ async function printRepoDoctor(args: ParsedArgs, manifest: Awaited<ReturnType<ty
         ok: modelDoctor.ok,
         selection: modelDoctor.selection,
         effectiveProvider: modelDoctor.effectiveProvider,
+        connection: modelDoctor.connection,
         counts: {
           errors: modelErrors,
           warnings: modelWarnings,
@@ -2768,7 +2805,7 @@ async function printRepoDoctor(args: ParsedArgs, manifest: Awaited<ReturnType<ty
     console.log(`- ${check.status.toUpperCase()} ${check.name}: ${check.message}`);
   }
   console.log("");
-  console.log("OpenAI live smoke:");
+  console.log(`${capitalize(liveSmoke.provider)} live smoke:`);
   console.log(`- status: ${liveSmoke.status}`);
   console.log(`- verified: ${liveSmoke.verified ? "yes" : "no"}`);
   console.log(`- command: ${liveSmoke.command}`);
@@ -2805,85 +2842,55 @@ function buildLatestInspectionCommands(): { session: string; report: string; che
 }
 
 function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResult): LiveSmokeReadiness {
-  const command = "npx pnpm@9.15.0 smoke:openai";
+  const provider = liveSmokeProvider(args, modelDoctor);
+  const command = `npx pnpm@9.15.0 smoke:${provider}`;
   const probe = modelDoctor.checks.find((check) => check.name === "probe");
-  const hasApiKey = Boolean(process.env.OPENAI_API_KEY);
-  const baseUrl = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-  const apiProtocol = args.apiProtocol ?? parseApiProtocol(process.env.OPENAI_API_PROTOCOL || "responses");
-  const model = modelDoctor.selection.model;
-  const endpoint = `${baseUrl.replace(/\/+$/, "")}/${apiProtocol === "responses" ? "responses" : "chat/completions"}`;
-  const verified = Boolean(args.probe && modelDoctor.effectiveProvider === "openai" && probe?.status === "ok");
-  const failed = Boolean(args.probe && modelDoctor.effectiveProvider === "openai" && probe?.status === "error");
-
-  if (verified) {
-    return {
-      provider: "openai",
-      command,
-      status: "verified",
-      verified: true,
-      requiredEnv: ["OPENAI_API_KEY"],
-      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"],
-      baseUrl,
-      apiProtocol,
-      model,
-      timeoutMs: modelDoctor.requestTimeoutMs,
-      endpoint,
-      message: "OpenAI live probe completed successfully.",
-      lastProbeStatus: probe?.status
-    };
-  }
-
-  if (failed) {
-    return {
-      provider: "openai",
-      command,
-      status: "failed",
-      verified: false,
-      requiredEnv: ["OPENAI_API_KEY"],
-      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"],
-      baseUrl,
-      apiProtocol,
-      model,
-      timeoutMs: modelDoctor.requestTimeoutMs,
-      endpoint,
-      message: probe?.message ?? "OpenAI live probe failed.",
-      lastProbeStatus: probe?.status
-    };
-  }
-
-  if (!hasApiKey) {
-    return {
-      provider: "openai",
-      command,
-      status: "missing-api-key",
-      verified: false,
-      requiredEnv: ["OPENAI_API_KEY"],
-      optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"],
-      baseUrl,
-      apiProtocol,
-      model,
-      timeoutMs: modelDoctor.requestTimeoutMs,
-      endpoint,
-      message: "OPENAI_API_KEY is not set, so the OpenAI live smoke test cannot run.",
-      lastProbeStatus: probe?.status
-    };
-  }
+  const config = resolveProviderConfig({
+    provider,
+    model: modelDoctor.effectiveProvider === provider ? modelDoctor.selection.model : undefined,
+    apiProtocol: args.apiProtocol
+  });
+  const providerLabel = capitalize(provider);
+  const verified = Boolean(args.probe && modelDoctor.effectiveProvider === provider && probe?.status === "ok");
+  const failed = Boolean(args.probe && modelDoctor.effectiveProvider === provider && probe?.status === "error");
+  const status = verified ? "verified" : failed ? "failed" : config.apiKey ? "ready" : "missing-api-key";
+  const message = verified
+    ? `${providerLabel} live probe completed successfully.`
+    : failed
+      ? probe?.message ?? `${providerLabel} live probe failed.`
+      : config.apiKey
+        ? `${config.apiKeyEnv} is available. Run the smoke command to verify ${config.endpoint}.`
+        : `${config.apiKeyEnv} is not set, so the ${providerLabel} live smoke test cannot run.`;
 
   return {
-    provider: "openai",
+    provider,
     command,
-    status: "ready",
-    verified: false,
-    requiredEnv: ["OPENAI_API_KEY"],
-    optionalEnv: ["OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"],
-    baseUrl,
-    apiProtocol,
-    model,
-    timeoutMs: modelDoctor.requestTimeoutMs,
-    endpoint,
-    message: `OPENAI_API_KEY is available. Run the smoke command to verify ${endpoint}.`,
+    status,
+    verified,
+    requiredEnv: config.apiKeyEnv ? [config.apiKeyEnv] : [],
+    optionalEnv: config.optionalEnv,
+    baseUrl: config.baseUrl ?? "",
+    ...(config.apiProtocol ? { apiProtocol: config.apiProtocol } : {}),
+    model: config.model,
+    timeoutMs: config.timeoutMs,
+    endpoint: config.endpoint ?? "",
+    message,
     lastProbeStatus: probe?.status
   };
+}
+
+function liveSmokeProvider(args: ParsedArgs, modelDoctor: ModelDoctorResult): CommercialProviderName {
+  if (modelDoctor.effectiveProvider !== "stub") {
+    return modelDoctor.effectiveProvider;
+  }
+  if (args.provider === "openai" || args.provider === "anthropic" || args.provider === "gemini") {
+    return args.provider;
+  }
+  return "openai";
+}
+
+function capitalize(value: string): string {
+  return value === "openai" ? "OpenAI" : `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }
 
 function formatPolicyValue(value: unknown): string {

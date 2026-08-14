@@ -70,7 +70,7 @@ export class OpenAIResponsesProvider implements ModelProvider {
       if (isAbortError(error)) {
         throw new Error(`OpenAI request timed out after ${this.timeoutMs}ms.`);
       }
-      throw formatProviderNetworkError("OpenAI network request failed", error);
+      throw formatProviderNetworkError("OpenAI network request failed", error, [this.apiKey]);
     } finally {
       clearTimeout(timeout);
     }

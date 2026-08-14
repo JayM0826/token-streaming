@@ -234,7 +234,12 @@ export async function scaffoldOfficialManifest(
     "safety.yaml",
     stringifySimpleYaml({
       sensitive_paths: [".env", ".env.*", "secrets/*"],
-      protected_patterns: ["BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY", "OPENAI_API_KEY\\s*="],
+      protected_patterns: [
+        "BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY",
+        "OPENAI_API_KEY\\s*=",
+        "ANTHROPIC_API_KEY\\s*=",
+        "GEMINI_API_KEY\\s*="
+      ],
       approval_required_commands: ["npm publish", "pnpm publish", "netlify deploy --prod"],
       forbidden_commands: ["git reset --hard", "git checkout --"]
     }),

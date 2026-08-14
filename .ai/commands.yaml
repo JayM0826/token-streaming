@@ -95,6 +95,8 @@ model_doctor:
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- doctor models --json
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- doctor models --probe
   - npx pnpm@9.15.0 smoke:openai
+  - npx pnpm@9.15.0 smoke:anthropic
+  - npx pnpm@9.15.0 smoke:gemini
 manifest:
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest init
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- manifest init --json

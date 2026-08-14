@@ -103,6 +103,59 @@ test("resolveModelSelection falls back to provider defaults", () => {
   });
 });
 
+test("resolveModelSelection honors available manifest candidate providers in auto mode", () => {
+  const selection = resolveModelSelection({
+    mode: "auto",
+    requestedProvider: "auto",
+    availableProviders: ["stub", "anthropic"],
+    manifest: {
+      models: {
+        model_candidates: [
+          "gpt-model;provider=openai;quality=0.99;cost=0.1;latency=0.1;tags=balanced",
+          "claude-model;provider=anthropic;quality=0.9;cost=0.4;latency=0.4;tags=balanced"
+        ]
+      }
+    }
+  });
+
+  assert.equal(selection.provider, "anthropic");
+  assert.equal(selection.model, "claude-model");
+  assert.equal(selection.scoring.candidates.some((candidate) => candidate.provider === "openai"), false);
+});
+
+test("resolveModelSelection uses the available provider default instead of an unavailable model family", () => {
+  const selection = resolveModelSelection({
+    mode: "auto",
+    requestedProvider: "auto",
+    availableProviders: ["stub", "anthropic"],
+    manifest: {
+      models: {
+        default_provider: "auto",
+        auto_model: "gpt-5.5",
+        model_candidates: ["gpt-5.5;provider=openai;quality=0.94;cost=0.75;latency=0.55;tags=balanced"]
+      }
+    }
+  });
+
+  assert.deepEqual(selection, { provider: "auto", source: "provider-default" });
+});
+
+test("resolveModelSelection does not send another provider's manifest model to an explicit provider", () => {
+  const selection = resolveModelSelection({
+    mode: "max",
+    requestedProvider: "anthropic",
+    availableProviders: ["stub", "anthropic"],
+    manifest: {
+      models: {
+        max_model: "gpt-5.5",
+        model_candidates: ["gpt-5.5;provider=openai;quality=0.94;cost=0.75;latency=0.55;tags=max"]
+      }
+    }
+  });
+
+  assert.deepEqual(selection, { provider: "anthropic", source: "provider-default" });
+});
+
 test("scoreModelCandidates ranks manifest candidates by mode objective and telemetry", () => {
   const decision = scoreModelCandidates({
     mode: "economy",

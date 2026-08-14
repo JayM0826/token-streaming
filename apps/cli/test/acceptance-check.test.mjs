@@ -10,12 +10,11 @@ const relayFixture = path.join(repoRoot, "apps", "cli", "test", "fixtures", "ope
 test("acceptance check reports missing OpenAI live smoke as incomplete", () => {
   const result = spawnSync(process.execPath, [acceptanceScript, "--quick", "--json"], {
     cwd: repoRoot,
-    env: {
-      ...process.env,
+    env: cleanProviderEnvironment({
       OPENAI_API_KEY: "",
       OPENAI_MODEL: "",
       OPENAI_TIMEOUT_MS: ""
-    },
+    }),
     encoding: "utf8"
   });
   const output = JSON.parse(result.stdout);
@@ -49,14 +48,13 @@ test("acceptance check verifies Responses and Chat Completions provider probes",
     ]) {
       const result = spawnSync(process.execPath, [acceptanceScript, "--quick", "--json"], {
         cwd: repoRoot,
-        env: {
-          ...process.env,
+        env: cleanProviderEnvironment({
           OPENAI_API_KEY: "relay-key",
           OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
           OPENAI_API_PROTOCOL: protocol,
           OPENAI_MODEL: "relay-model",
           OPENAI_TIMEOUT_MS: ""
-        },
+        }),
         encoding: "utf8"
       });
       const output = JSON.parse(result.stdout);
@@ -79,20 +77,66 @@ test("acceptance check verifies Responses and Chat Completions provider probes",
   }
 });
 
+test("acceptance check verifies native Anthropic and Gemini provider probes", async () => {
+  const relay = spawn(process.execPath, [relayFixture], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    const port = await readFirstLine(relay);
+    for (const provider of [
+      {
+        name: "anthropic",
+        keyEnv: "ANTHROPIC_API_KEY",
+        baseUrlEnv: "ANTHROPIC_BASE_URL",
+        modelEnv: "ANTHROPIC_MODEL",
+        model: "claude-test",
+        endpoint: "messages"
+      },
+      {
+        name: "gemini",
+        keyEnv: "GEMINI_API_KEY",
+        baseUrlEnv: "GEMINI_BASE_URL",
+        modelEnv: "GEMINI_MODEL",
+        model: "gemini-test",
+        endpoint: "interactions"
+      }
+    ]) {
+      const result = spawnSync(process.execPath, [acceptanceScript, "--quick", "--json", "--provider", provider.name], {
+        cwd: repoRoot,
+        env: cleanProviderEnvironment({
+          [provider.keyEnv]: "native-key",
+          [provider.baseUrlEnv]: `http://127.0.0.1:${port}/v1`,
+          [provider.modelEnv]: provider.model
+        }),
+        encoding: "utf8"
+      });
+      const output = JSON.parse(result.stdout);
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(output.ok, true);
+      assert.equal(output.offlineOk, true);
+      assert.equal(output.liveSmoke.provider, provider.name);
+      assert.equal(output.liveSmoke.status, "verified");
+      assert.equal(output.liveSmoke.model, provider.model);
+      assert.equal(output.liveSmoke.endpoint, `http://127.0.0.1:${port}/v1/${provider.endpoint}`);
+      assert.match(output.results.find((step) => step.name === "live-smoke")?.command ?? "", new RegExp(`--provider ${provider.name}`));
+    }
+  } finally {
+    relay.kill();
+  }
+});
+
 test("acceptance check keeps offline gates green when the live provider fails", async () => {
   const relay = spawn(process.execPath, [relayFixture], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
   try {
     const port = await readFirstLine(relay);
     const result = spawnSync(process.execPath, [acceptanceScript, "--quick", "--json"], {
       cwd: repoRoot,
-      env: {
-        ...process.env,
+      env: cleanProviderEnvironment({
         OPENAI_API_KEY: "relay-key",
         OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
         OPENAI_API_PROTOCOL: "responses",
         OPENAI_MODEL: "failing-model",
         OPENAI_TIMEOUT_MS: ""
-      },
+      }),
       encoding: "utf8"
     });
     const output = JSON.parse(result.stdout);
@@ -131,4 +175,26 @@ function readFirstLine(child) {
       }
     });
   });
+}
+
+function cleanProviderEnvironment(overrides = {}) {
+  const environment = { ...process.env };
+  for (const name of [
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_PROTOCOL",
+    "OPENAI_MODEL",
+    "OPENAI_TIMEOUT_MS",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_TIMEOUT_MS",
+    "GEMINI_API_KEY",
+    "GEMINI_BASE_URL",
+    "GEMINI_MODEL",
+    "GEMINI_TIMEOUT_MS"
+  ]) {
+    environment[name] = "";
+  }
+  return { ...environment, ...overrides };
 }

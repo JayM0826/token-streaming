@@ -222,6 +222,8 @@ Run reports include a `Changes` section for patch and rollback context.
 
 Model selection is policy-driven but still user-overridable.
 
+Provider-specific wire formats stop at `packages/providers`. The runtime consumes the shared `ModelProvider` request/response contract, while adapters translate it to OpenAI Responses or Chat Completions, Anthropic Messages, Gemini Interactions, or the deterministic local stub. Authentication headers, base URLs, request shapes, response text, token usage, timeout handling, and safe diagnostics remain adapter concerns.
+
 - CLI `--model` has the highest priority.
 - `.ai/models.yaml` can define `economy_model`, `auto_model`, `max_model`, `default_model`, and scored `model_candidates`.
 - The model router keeps CLI overrides first, then scores manifest candidates by mode objective, task risk, cost, latency, quality, and local model failure telemetry.
@@ -230,13 +232,13 @@ Model selection is policy-driven but still user-overridable.
 - Provider routing remains separate from strategy execution so cost/effectiveness choices can evolve independently from orchestration.
 - `models select [task...]` previews routing without calling a provider and can explain task-specific feedback matches.
 - `models select --json` exposes routing decisions, inferred task kind, candidate feedback, and telemetry recommendations as structured data for cost/effectiveness UI and automation.
-- `doctor models` validates selection and provider readiness without network calls unless `--probe` is passed. Probe requests use the selected provider/model, low reasoning effort, a small output cap, request timeout handling, safe nested transport diagnostics, one retry for transient connection failures, and structured error reporting for JSON and non-JSON upstream failures. HTTP failures accept both OpenAI-style nested errors and relay-style top-level `code`/`message`, retaining the status plus optional upstream `type`, `code`, and request ID while bounding the message and redacting the configured API key.
+- `doctor models` validates selection and provider readiness without network calls unless `--probe` is passed. Probe requests use the selected provider/model, low reasoning effort, a small output cap, request timeout handling, safe nested transport diagnostics, one retry for transient connection failures, and structured error reporting for JSON and non-JSON upstream failures. HTTP failures accept OpenAI, Anthropic, Gemini, and common relay error envelopes while retaining bounded status/type/code/request-id metadata and redacting the configured API key.
 - `doctor models --json` exposes readiness checks, skipped/warning/error counts, selected model, and effective provider for CI, automation, and future desktop status panels.
-- `pnpm smoke:openai` is the explicit live smoke entry point. It requires `OPENAI_API_KEY` and runs `doctor models --probe --json` with `--provider openai` through the built CLI.
+- `pnpm smoke:openai`, `pnpm smoke:anthropic`, and `pnpm smoke:gemini` are explicit live smoke entry points. Each requires its native key and runs `doctor models --probe --json` with the concrete provider through the built CLI.
 
 ## Repository Doctor
 
-`doctor repo` aggregates the read-only health checks that matter before an agent run: repository scan, manifest validation, model readiness, OpenAI live-smoke readiness, current git status, local storage history, and tool catalog readiness. Its JSON output publishes the OpenAI smoke command/status plus latest session/report summaries with status fields and stable `latest` inspection commands for sessions, reports, and checkpoints so a future desktop host can open the newest artifacts without reimplementing CLI routing. It does not run tests, apply patches, create sessions, or call a model unless `--probe` is explicitly passed through to the model doctor.
+`doctor repo` aggregates the read-only health checks that matter before an agent run: repository scan, manifest validation, model readiness, provider-specific live-smoke readiness, current git status, local storage history, and tool catalog readiness. Its JSON output publishes the selected provider connection and smoke command/status plus latest session/report summaries with status fields and stable `latest` inspection commands for sessions, reports, and checkpoints so a future desktop host can open the newest artifacts without reimplementing CLI routing. It does not run tests, apply patches, create sessions, or call a model unless `--probe` is explicitly passed through to the model doctor.
 
 `doctor repo --json` exposes this aggregate status as structured data for automation and future desktop status panels.
 
@@ -278,7 +280,7 @@ The generated fallback `repo-map.json` is intentionally heuristic: it records tr
 
 `manifest validate --json` emits the same result as structured issue counts and issue records.
 
-Model routing metadata is validated as part of the same manifest gate: `default_provider` must be `auto`, `openai`, or `stub`; mode-specific model fields must be non-empty strings; and `model_candidates` must use bounded `quality`, `cost`, and `latency` values from 0 to 1. This keeps cost/effectiveness routing explainable and prevents malformed candidate scores from silently steering the agent.
+Model routing metadata is validated as part of the same manifest gate: `default_provider` must be `auto`, `openai`, `anthropic`, `gemini`, or `stub`; mode-specific model fields must be non-empty strings; and `model_candidates` must use bounded `quality`, `cost`, and `latency` values from 0 to 1. This keeps cost/effectiveness routing explainable and prevents malformed candidate scores from silently steering the agent.
 
 `commands list` exposes `.ai/commands.yaml` as a read-only command catalog. It intentionally does not execute the commands; execution remains behind explicit runtime verification or user shell actions so the manifest can be inspected safely by both the CLI and future desktop hosts. `commands list --json` returns the same catalog as structured command groups.
 
@@ -296,7 +298,7 @@ V1 keeps these extension points present but intentionally small:
 
 - strategies: only `default` is built in, but runtime and CLI can resolve registered strategies by id
 - product modes: `economy`, `max`, `auto` resolve to explicit reasoning, context-budget, verification-depth, and reviewer-participation behavior
-- model providers: OpenAI Responses API provider plus stub fallback
+- model providers: native OpenAI Responses/Chat Completions, Anthropic Messages, Gemini Interactions, plus stub fallback behind one interface
 - agent roles: represented as phases in the execution plan
 - safety: manifest-aware risk classification and future approval hooks
 

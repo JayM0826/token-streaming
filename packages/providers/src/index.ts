@@ -1,5 +1,7 @@
+export * from "./anthropic-provider.js";
 export * from "./factory.js";
 export * from "./doctor.js";
+export * from "./gemini-provider.js";
 export * from "./model-policy.js";
 export * from "./network-error.js";
 export * from "./openai-chat-provider.js";

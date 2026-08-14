@@ -24,6 +24,32 @@ const server = http.createServer((request, response) => {
       );
       return;
     }
+    if (request.url === "/v1/messages") {
+      if (!request.headers["x-api-key"] || request.headers["anthropic-version"] !== "2023-06-01") {
+        response.statusCode = 401;
+        response.end(JSON.stringify({ error: { message: "Missing Anthropic authentication headers" } }));
+        return;
+      }
+      response.end(
+        JSON.stringify({ content: [{ type: "text", text: "ok" }], model: parsed.model, usage: { input_tokens: 1, output_tokens: 1 } })
+      );
+      return;
+    }
+    if (request.url === "/v1/interactions") {
+      if (!request.headers["x-goog-api-key"]) {
+        response.statusCode = 401;
+        response.end(JSON.stringify({ error: { message: "Missing Gemini authentication header" } }));
+        return;
+      }
+      response.end(
+        JSON.stringify({
+          model: parsed.model,
+          steps: [{ type: "model_output", content: [{ type: "text", text: "ok" }] }],
+          usage: { total_input_tokens: 1, total_output_tokens: 1 }
+        })
+      );
+      return;
+    }
     response.statusCode = 404;
     response.end(JSON.stringify({ error: { message: `Unexpected endpoint: ${request.url}` } }));
   });

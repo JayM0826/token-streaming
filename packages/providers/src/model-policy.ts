@@ -1,4 +1,5 @@
 import type { ProductMode, RepoManifest } from "@token-streaming/protocol";
+import { inferProviderFromModel } from "./factory.js";
 import type { ProviderName } from "./factory.js";
 
 export interface ModelSelectionInput {
@@ -10,6 +11,7 @@ export interface ModelSelectionInput {
   telemetry?: ModelRoutingTelemetry;
   riskLevel?: "low" | "medium" | "high";
   task?: string;
+  availableProviders?: ProviderName[];
 }
 
 export interface ModelSelection {
@@ -73,7 +75,7 @@ export interface ModelRoutingDecision {
 export function resolveModelSelection(input: ModelSelectionInput): ModelSelection {
   if (input.requestedModel) {
     return {
-      provider: input.requestedProvider ?? "auto",
+      provider: selectedProvider(input, readProvider(input.manifest?.models?.default_provider)),
       model: input.requestedModel,
       source: "cli"
     };
@@ -82,7 +84,7 @@ export function resolveModelSelection(input: ModelSelectionInput): ModelSelectio
   const environmentModel = stringValue(input.environmentModel);
   if (environmentModel) {
     return {
-      provider: input.requestedProvider ?? "auto",
+      provider: selectedProvider(input, readProvider(input.manifest?.models?.default_provider)),
       model: environmentModel,
       source: "environment"
     };
@@ -95,22 +97,23 @@ export function resolveModelSelection(input: ModelSelectionInput): ModelSelectio
     manifest: input.manifest,
     telemetry: input.telemetry,
     riskLevel: input.riskLevel,
-    task: input.task
+    task: input.task,
+    availableProviders: input.availableProviders
   });
   if (scored.selected) {
     return {
-      provider: input.requestedProvider ?? scored.selected.provider,
+      provider: selectedProvider(input, scored.selected.provider),
       model: scored.selected.model,
       source: "scored",
       scoring: scored
     };
   }
 
-  const model = stringValue(policy[`${input.mode}_model`]) ?? stringValue(policy.default_model);
+  const model = usablePolicyModel(policy[`${input.mode}_model`], input) ?? usablePolicyModel(policy.default_model, input);
 
   if (model) {
     return {
-      provider: input.requestedProvider ?? readProvider(policy.default_provider),
+      provider: selectedProvider(input, readProvider(policy.default_provider)),
       model,
       source: "manifest",
       ...(scored.candidates.length ? { scoring: scored } : {})
@@ -118,7 +121,7 @@ export function resolveModelSelection(input: ModelSelectionInput): ModelSelectio
   }
 
   return {
-    provider: input.requestedProvider ?? readProvider(policy.default_provider),
+    provider: selectedProvider(input, readProvider(policy.default_provider)),
     source: "provider-default",
     ...(scored.candidates.length ? { scoring: scored } : {})
   };
@@ -128,7 +131,7 @@ export function scoreModelCandidates(input: ModelSelectionInput): ModelRoutingDe
   const objective = objectiveForMode(input.mode);
   const riskLevel = input.riskLevel ?? "medium";
   const taskKind = inferTaskKind(input.task);
-  const candidates = parseModelCandidates(input.manifest?.models, input.requestedProvider);
+  const candidates = parseModelCandidates(input.manifest?.models, input.requestedProvider, input.availableProviders);
   const scored = candidates
     .map((candidate) => scoreCandidate(candidate, input.mode, objective, riskLevel, taskKind, input.telemetry))
     .sort((left, right) => right.score - left.score || left.model.localeCompare(right.model));
@@ -142,7 +145,11 @@ export function scoreModelCandidates(input: ModelSelectionInput): ModelRoutingDe
   };
 }
 
-function parseModelCandidates(models: Pick<RepoManifest, "models">["models"], requestedProvider?: ProviderName): ModelCandidate[] {
+function parseModelCandidates(
+  models: Pick<RepoManifest, "models">["models"],
+  requestedProvider?: ProviderName,
+  availableProviders?: ProviderName[]
+): ModelCandidate[] {
   const policy = models ?? {};
   const explicit = stringArray(policy.model_candidates).map(parseCandidateSpec).filter((candidate): candidate is ModelCandidate => candidate !== undefined);
   const legacy = [
@@ -152,9 +159,29 @@ function parseModelCandidates(models: Pick<RepoManifest, "models">["models"], re
     legacyCandidate(policy.default_model, "default")
   ].filter((candidate): candidate is ModelCandidate => candidate !== undefined);
   const byModel = new Map<string, ModelCandidate>();
+  const hasAvailableCommercialProvider = availableProviders?.some(
+    (provider) => provider === "openai" || provider === "anthropic" || provider === "gemini"
+  );
 
   for (const candidate of [...legacy, ...explicit]) {
-    const provider = requestedProvider ?? candidate.provider;
+    if (
+      requestedProvider &&
+      requestedProvider !== "auto" &&
+      candidate.provider !== "auto" &&
+      candidate.provider !== requestedProvider
+    ) {
+      continue;
+    }
+    const provider = preferredProvider(requestedProvider, candidate.provider);
+    if (
+      hasAvailableCommercialProvider &&
+      provider !== "auto" &&
+      provider !== "stub" &&
+      !availableProviders?.includes(provider) &&
+      (requestedProvider === undefined || requestedProvider === "auto")
+    ) {
+      continue;
+    }
     byModel.set(`${provider}:${candidate.model}`, { ...candidate, provider });
   }
 
@@ -177,7 +204,7 @@ function parseCandidateSpec(value: string): ModelCandidate | undefined {
 
   return {
     model: modelPart,
-    provider: readProvider(fields.get("provider")),
+    provider: fields.has("provider") ? readProvider(fields.get("provider")) : inferProviderFromModel(modelPart) ?? "auto",
     quality: boundedNumber(fields.get("quality"), 0.7),
     cost: boundedNumber(fields.get("cost"), 0.5),
     latency: boundedNumber(fields.get("latency"), 0.5),
@@ -193,7 +220,7 @@ function legacyCandidate(value: unknown, mode: string): ModelCandidate | undefin
   }
   return {
     model,
-    provider: "auto",
+    provider: inferProviderFromModel(model) ?? "auto",
     quality: mode === "max" ? 0.9 : mode === "economy" ? 0.62 : 0.78,
     cost: mode === "economy" ? 0.25 : mode === "max" ? 0.85 : 0.55,
     latency: mode === "economy" ? 0.3 : mode === "max" ? 0.75 : 0.5,
@@ -354,10 +381,53 @@ function inferTaskKind(task: string | undefined): string {
 }
 
 function readProvider(value: unknown): ProviderName {
-  if (value === "stub" || value === "openai" || value === "auto") {
+  if (value === "stub" || value === "openai" || value === "anthropic" || value === "gemini" || value === "auto") {
     return value;
   }
   return "auto";
+}
+
+function preferredProvider(requestedProvider: ProviderName | undefined, fallback: ProviderName): ProviderName {
+  return requestedProvider && requestedProvider !== "auto" ? requestedProvider : fallback;
+}
+
+function selectedProvider(input: ModelSelectionInput, fallback: ProviderName): ProviderName {
+  const provider = preferredProvider(input.requestedProvider, fallback);
+  if (
+    (input.requestedProvider === undefined || input.requestedProvider === "auto") &&
+    input.availableProviders &&
+    provider !== "auto" &&
+    provider !== "stub" &&
+    !input.availableProviders.includes(provider)
+  ) {
+    return "auto";
+  }
+  return provider;
+}
+
+function usablePolicyModel(value: unknown, input: ModelSelectionInput): string | undefined {
+  const model = stringValue(value);
+  if (!model) {
+    return undefined;
+  }
+  const inferredProvider = inferProviderFromModel(model);
+  if (!inferredProvider) {
+    return model;
+  }
+  if (input.requestedProvider && input.requestedProvider !== "auto" && input.requestedProvider !== inferredProvider) {
+    return undefined;
+  }
+  const hasAvailableCommercialProvider = input.availableProviders?.some(
+    (provider) => provider === "openai" || provider === "anthropic" || provider === "gemini"
+  );
+  if (
+    hasAvailableCommercialProvider &&
+    (input.requestedProvider === undefined || input.requestedProvider === "auto") &&
+    !input.availableProviders?.includes(inferredProvider)
+  ) {
+    return undefined;
+  }
+  return model;
 }
 
 function stringValue(value: unknown): string | undefined {

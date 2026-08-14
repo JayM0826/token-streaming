@@ -906,7 +906,7 @@ test("CLI exposes model doctor warnings as JSON", async () => {
   assert.equal(output.counts.errors, 0);
   assert.equal(output.counts.warnings, 1);
   assert.equal(output.counts.skipped, 1);
-  assert.equal(output.checks.some((check) => check.name === "openai-api-key" && check.status === "warning"), true);
+  assert.equal(output.checks.some((check) => check.name === "provider-api-key" && check.status === "warning"), true);
   assert.equal(output.checks.some((check) => check.name === "probe" && check.status === "skipped"), true);
 });
 
@@ -1329,7 +1329,7 @@ async function writePatchProposal(filePath, summary, targetPath, content) {
 function runCli(args, env = {}) {
   const stdout = execFileSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, OPENAI_MODEL: "", OPENAI_TIMEOUT_MS: "", ...env },
+    env: cleanProviderEnvironment(env),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -1339,7 +1339,7 @@ function runCli(args, env = {}) {
 function runCliJsonLines(args, env = {}) {
   const stdout = execFileSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, OPENAI_MODEL: "", OPENAI_TIMEOUT_MS: "", ...env },
+    env: cleanProviderEnvironment(env),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -1352,7 +1352,7 @@ function runCliJsonLines(args, env = {}) {
 function runCliRaw(args, env = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, OPENAI_MODEL: "", OPENAI_TIMEOUT_MS: "", ...env },
+    env: cleanProviderEnvironment(env),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -1361,7 +1361,7 @@ function runCliRaw(args, env = {}) {
 function runCliRawWithInput(args, stdin, env = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
-    env: { ...process.env, OPENAI_MODEL: "", OPENAI_TIMEOUT_MS: "", ...env },
+    env: cleanProviderEnvironment(env),
     encoding: "utf8",
     input: stdin,
     stdio: ["pipe", "pipe", "pipe"]
@@ -1370,4 +1370,16 @@ function runCliRawWithInput(args, stdin, env = {}) {
 
 async function assertFileExists(filePath) {
   await assert.doesNotReject(access(filePath));
+}
+
+function cleanProviderEnvironment(overrides = {}) {
+  const environment = { ...process.env };
+  for (const name of [
+    "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_TIMEOUT_MS",
+    "GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_TIMEOUT_MS"
+  ]) {
+    environment[name] = "";
+  }
+  return { ...environment, ...overrides };
 }

@@ -2,6 +2,7 @@ interface ErrorPayload {
   message?: unknown;
   type?: unknown;
   code?: unknown;
+  status?: unknown;
 }
 
 export function formatProviderHttpError(
@@ -14,6 +15,7 @@ export function formatProviderHttpError(
   const metadata = [
     formatMetadata("type", payload?.type, sensitiveValues),
     formatMetadata("code", payload?.code, sensitiveValues),
+    formatMetadata("status", payload?.status, sensitiveValues),
     formatMetadata("request_id", response.headers.get("x-request-id") ?? response.headers.get("request-id"), sensitiveValues)
   ].filter((value): value is string => Boolean(value));
   const suffix = metadata.length ? ` (${metadata.join(", ")})` : "";
@@ -32,10 +34,10 @@ function extractErrorPayload(body: unknown): ErrorPayload | undefined {
     return error as ErrorPayload;
   }
   if (typeof error === "string") {
-    return { message: error, type: record.type, code: record.code };
+    return { message: error, type: record.type, code: record.code, status: record.status };
   }
-  if (record.message !== undefined || record.type !== undefined || record.code !== undefined) {
-    return { message: record.message, type: record.type, code: record.code };
+  if (record.message !== undefined || record.type !== undefined || record.code !== undefined || record.status !== undefined) {
+    return { message: record.message, type: record.type, code: record.code, status: record.status };
   }
   return undefined;
 }

@@ -99,11 +99,18 @@ function validateModelsPolicy(models: Record<string, unknown> | undefined, issue
   }
 
   const provider = models.default_provider;
-  if (provider !== undefined && provider !== "auto" && provider !== "openai" && provider !== "stub") {
+  if (
+    provider !== undefined &&
+    provider !== "auto" &&
+    provider !== "openai" &&
+    provider !== "anthropic" &&
+    provider !== "gemini" &&
+    provider !== "stub"
+  ) {
     issues.push({
       severity: "error",
       code: "models.default_provider.invalid",
-      message: "default_provider must be one of: auto, openai, stub.",
+      message: "default_provider must be one of: auto, openai, anthropic, gemini, stub.",
       path: ".ai/models.yaml"
     });
   }
@@ -187,11 +194,18 @@ function validateModelCandidate(candidate: string, issues: ManifestValidationIss
   }
 
   const provider = fields.get("provider");
-  if (provider !== undefined && provider !== "auto" && provider !== "openai" && provider !== "stub") {
+  if (
+    provider !== undefined &&
+    provider !== "auto" &&
+    provider !== "openai" &&
+    provider !== "anthropic" &&
+    provider !== "gemini" &&
+    provider !== "stub"
+  ) {
     issues.push({
       severity: "error",
       code: "models.model_candidate.provider.invalid",
-      message: `Candidate "${model}" provider must be one of: auto, openai, stub.`,
+      message: `Candidate "${model}" provider must be one of: auto, openai, anthropic, gemini, stub.`,
       path: ".ai/models.yaml"
     });
   }

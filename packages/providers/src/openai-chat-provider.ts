@@ -64,7 +64,7 @@ export class OpenAIChatCompletionsProvider implements ModelProvider {
       if (isAbortError(error)) {
         throw new Error(`OpenAI-compatible chat request timed out after ${this.timeoutMs}ms.`);
       }
-      throw formatProviderNetworkError("OpenAI-compatible chat network request failed", error);
+      throw formatProviderNetworkError("OpenAI-compatible chat network request failed", error, [this.apiKey]);
     } finally {
       clearTimeout(timeout);
     }

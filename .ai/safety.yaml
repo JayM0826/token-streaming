@@ -3,10 +3,14 @@ sensitive_paths:
   - packages/tools/src/patch-engine.ts
   - packages/storage/src/checkpoint-store.ts
   - packages/providers/src/openai-provider.ts
+  - packages/providers/src/openai-chat-provider.ts
+  - packages/providers/src/anthropic-provider.ts
+  - packages/providers/src/gemini-provider.ts
 protected_patterns:
   - BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY
   - OPENAI_API_KEY\s*=
   - ANTHROPIC_API_KEY\s*=
+  - GEMINI_API_KEY\s*=
 approval_required_commands:
   - npm publish
   - pnpm publish

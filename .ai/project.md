@@ -9,6 +9,5 @@ The project is intentionally headless at the core layer. The CLI is the first ho
 - Implement one real orchestration strategy: `default`.
 - Keep product modes represented as `economy`, `max`, and `auto`.
 - Treat `.ai/`, `module.yaml`, and `flow.yaml` as first-class repository context.
-- Use OpenAI Responses API through a provider abstraction, with a stub fallback for local development.
+- Use native OpenAI, Anthropic, and Gemini APIs through a provider abstraction, with a stub fallback for local development.
 - Persist event logs, checkpoints, and markdown run reports.
-

@@ -1,4 +1,4 @@
 #!/usr/bin/env node
 import { runProviderSmoke } from "./smoke-provider.mjs";
 
-runProviderSmoke("openai");
+runProviderSmoke("anthropic");

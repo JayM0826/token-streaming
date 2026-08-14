@@ -12,7 +12,7 @@ The first implementation focuses on one real orchestration strategy: `default`.
 - Apply edits through a patch/checkpoint boundary.
 - Leave room for future strategies and product modes without implementing them all up front.
 
-See [docs/implementation-plan.md](docs/implementation-plan.md) for the full plan, [docs/codex-build-brief.zh.md](docs/codex-build-brief.zh.md) for the Chinese product/engineering brief, [docs/v1-completion-audit.zh.md](docs/v1-completion-audit.zh.md) for the current completion decision, and [docs/v1-acceptance-matrix.md](docs/v1-acceptance-matrix.md) for requirement-by-requirement verification evidence.
+See [docs/implementation-plan.md](docs/implementation-plan.md) for the full plan, [docs/codex-build-brief.zh.md](docs/codex-build-brief.zh.md) for the Chinese product/engineering brief, [docs/provider-configuration.zh.md](docs/provider-configuration.zh.md) for commercial API setup, [docs/v1-completion-audit.zh.md](docs/v1-completion-audit.zh.md) for the current completion decision, and [docs/v1-acceptance-matrix.md](docs/v1-acceptance-matrix.md) for requirement-by-requirement verification evidence.
 
 ## Development
 
@@ -31,7 +31,7 @@ node apps/cli/dist/index.js --version
 `pnpm test` compiles all workspace packages and then runs the Node.js behavior tests in `packages/**/*.test.mjs` and `apps/**/*.test.mjs` against the compiled `dist` output.
 `pnpm package:check` verifies release readiness for the CLI and workspace packages: module READMEs, package metadata, dist entrypoints, type declarations, package file allowlists, Node engine constraints, and CLI bin shebangs.
 `pnpm package:install-check` packs all seven workspace packages, installs the tarballs in an isolated offline consumer, verifies the CLI bin shim, and smoke-tests both the installed CLI and the public headless core API.
-`pnpm acceptance:check` runs the offline gates, including a deterministic end-to-end stub run, and performs its own live provider probe when `OPENAI_API_KEY` is present. Without a key, it exits incomplete with a machine-readable `missing-api-key` status.
+`pnpm acceptance:check` runs the offline gates, including a deterministic end-to-end stub run, and performs its own live provider probe when an OpenAI, Anthropic, or Gemini API key is present. Without a key, it exits incomplete with a machine-readable `missing-api-key` status.
 
 ## Headless Core API
 
@@ -107,6 +107,8 @@ pnpm cli -- history prune --keep 20 --json
 pnpm cli -- --provider stub "inspect the repo"
 pnpm cli -- --strategy default --provider stub "inspect the repo"
 pnpm cli -- --provider openai --model gpt-5.5 "plan this change"
+pnpm cli -- --provider anthropic --model claude-sonnet-5 "plan this change"
+pnpm cli -- --provider gemini --model gemini-3.6-flash "plan this change"
 pnpm cli -- --parallel-agents --dry-run "fix failing test"
 pnpm cli -- --patch-file proposal.json --apply "apply a proposed change"
 pnpm cli -- --patch-file proposal.json --apply --repair "apply and try one repair if verification fails"
@@ -149,28 +151,52 @@ pnpm cli -- doctor models
 pnpm cli -- doctor models --json
 pnpm cli -- doctor models --probe
 pnpm smoke:openai
+pnpm smoke:anthropic
+pnpm smoke:gemini
 pnpm acceptance:check -- --json
 ```
 
 Provider behavior:
 
 - `--provider auto` is the default.
-- `auto` uses OpenAI when `OPENAI_API_KEY` is present.
+- `auto` uses a provider whose key is available. Model prefixes (`gpt-*`, `claude-*`, `gemini-*`) take precedence; otherwise the deterministic key order is OpenAI, Anthropic, then Gemini.
 - `auto` falls back to the stub provider when no API key is present.
 - `--provider openai` requires `OPENAI_API_KEY`.
+- `--provider anthropic` requires `ANTHROPIC_API_KEY` and uses the native Messages API at `<base-url>/messages`.
+- `--provider gemini` requires `GEMINI_API_KEY` and uses the native Interactions API at `<base-url>/interactions`.
 - `OPENAI_BASE_URL` optionally points the OpenAI provider at an OpenAI-compatible relay or gateway.
 - `OPENAI_API_PROTOCOL` selects `responses` (default) or `chat-completions`; the equivalent CLI option is `--api-protocol`.
 - `OPENAI_MODEL` overrides manifest model routing for relay-specific model names; an explicit `--model` still takes precedence.
 - `OPENAI_TIMEOUT_MS` sets the OpenAI-compatible request timeout in milliseconds (default `30000`, maximum `600000`).
+- Anthropic uses `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_TIMEOUT_MS`; defaults are `https://api.anthropic.com/v1` and `claude-sonnet-5`.
+- Gemini uses `GEMINI_BASE_URL`, `GEMINI_MODEL`, and `GEMINI_TIMEOUT_MS`; defaults are `https://generativelanguage.googleapis.com/v1` and `gemini-3.6-flash`.
 - A relay must expose either `<base-url>/responses` or `<base-url>/chat/completions`, matching the selected protocol.
 - `--model` overrides repository model policy.
 - `doctor repo` aggregates repository, manifest, model, git, storage, and tool readiness without running tests or calling a model by default.
-- `doctor repo --json` also exposes OpenAI live smoke readiness plus latest session, report, and checkpoint inspection commands for host UIs.
+- `doctor repo --json` also exposes provider-specific live smoke readiness plus latest session, report, and checkpoint inspection commands for host UIs.
 - `doctor repo --json` exposes the same health data for automation and future desktop hosts.
 - `doctor models` checks model policy and provider readiness without sending network requests by default.
 - `doctor models --json` exposes model readiness checks, skipped/warning/error counts, selected model, and effective provider.
 - `doctor models --probe` sends a minimal provider request with low reasoning effort, a small output cap, timeout handling, safe transport diagnostics, and one retry for transient connection failures.
-- `pnpm smoke:openai` requires `OPENAI_API_KEY` and runs the real OpenAI probe path through the built CLI.
+- `pnpm smoke:openai`, `pnpm smoke:anthropic`, and `pnpm smoke:gemini` run the matching real provider probe path through the built CLI.
+- `config inspect --json` and both doctor commands expose endpoints and key presence, but never expose API key values.
+
+Native Anthropic and Gemini setup on Windows PowerShell:
+
+```powershell
+$env:ANTHROPIC_API_KEY="your-anthropic-key"
+$env:ANTHROPIC_MODEL="claude-sonnet-5"
+pnpm cli -- --provider anthropic doctor models --probe --json
+pnpm smoke:anthropic
+
+$env:GEMINI_API_KEY="your-gemini-key"
+$env:GEMINI_MODEL="gemini-3.6-flash"
+pnpm cli -- --provider gemini doctor models --probe --json
+pnpm smoke:gemini
+```
+
+Set these variables in the same terminal that launches the CLI. Do not write API keys into `.ai/`, source files, command history, or committed `.env` files.
+
 - To test a third-party OpenAI-compatible relay, set both environment variables before probing:
 
 ```bash
@@ -194,7 +220,7 @@ export OPENAI_TIMEOUT_MS="120000"
 pnpm cli -- --provider openai doctor models --probe --json
 pnpm acceptance:check -- --json
 ```
-- `pnpm acceptance:check -- --json` is the final acceptance gate: offline quality checks plus OpenAI live-smoke verification.
+- `pnpm acceptance:check -- --provider <openai|anthropic|gemini> --json` is the final acceptance gate: offline quality checks plus the selected provider's live-smoke verification. Without `--provider`, the first configured provider is selected deterministically.
 
 Mode behavior:
 
@@ -228,7 +254,7 @@ Manifest behavior:
 - Generated `repo-map.json` includes heuristic module candidates, workflow candidates, test mappings, evidence, and confidence levels so inherited repos can be promoted into the official standard incrementally.
 - `manifest inspect --json` exposes manifest source, coverage, modules, workflows, playbooks, command groups, and validation results.
 - `manifest validate` checks the `.ai/` surface, ownership metadata, module manifests, playbooks, and verification catalog for agent-readable gaps.
-- `manifest validate` also checks `.ai/models.yaml` provider names, mode model fields, and scored `model_candidates` quality/cost/latency ranges.
+- `manifest validate` also checks `.ai/models.yaml` provider names (`auto`, `openai`, `anthropic`, `gemini`, `stub`), mode model fields, and scored `model_candidates` quality/cost/latency ranges.
 - `manifest validate --json` emits structured issue counts and issue details.
 - `commands list` prints the repository-declared standard commands from `.ai/commands.yaml` without executing them.
 - `commands list --json` exposes the command catalog as structured command groups.

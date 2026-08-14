@@ -2,9 +2,26 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+const PROVIDERS = {
+  openai: {
+    apiKeyEnv: "OPENAI_API_KEY",
+    environment: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"]
+  },
+  anthropic: {
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    environment: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_TIMEOUT_MS"]
+  },
+  gemini: {
+    apiKeyEnv: "GEMINI_API_KEY",
+    environment: ["GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_TIMEOUT_MS"]
+  }
+};
+
 const quick = process.argv.includes("--quick");
 const json = process.argv.includes("--json");
-const offlineEnvironment = withoutOpenAIEnvironment(process.env);
+const explicitProvider = requestedProvider(process.argv.slice(2));
+const provider = explicitProvider ?? configuredProvider(process.env);
+const offlineEnvironment = withoutProviderEnvironment(process.env);
 const repositoryDoctorArgs = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--json"];
 
 const steps = [
@@ -54,8 +71,16 @@ for (const [name, command] of steps) {
   });
 }
 
-if (process.env.OPENAI_API_KEY) {
-  const command = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--provider", "openai", "--probe", "--json"];
+if (explicitProvider && !process.env[PROVIDERS[explicitProvider].apiKeyEnv]?.trim()) {
+  const readiness = run(
+    [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--provider", explicitProvider, "--json"],
+    process.env
+  );
+  liveSmoke = parseJson(readiness.stdout)?.liveSmoke ?? liveSmoke;
+}
+
+if (provider && process.env[PROVIDERS[provider].apiKeyEnv]?.trim()) {
+  const command = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--provider", provider, "--probe", "--json"];
   const result = run(command, process.env);
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
   const parsed = parseJson(result.stdout);
@@ -116,9 +141,9 @@ function run(command, environment) {
   return result;
 }
 
-function withoutOpenAIEnvironment(environment) {
+function withoutProviderEnvironment(environment) {
   const offline = { ...environment };
-  for (const name of ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS"]) {
+  for (const name of Object.values(PROVIDERS).flatMap((definition) => definition.environment)) {
     delete offline[name];
   }
   return offline;
@@ -193,13 +218,34 @@ function printText(summary) {
   console.log("Acceptance check");
   console.log(`Status: ${summary.ok ? "ok" : "incomplete"}`);
   console.log(`Offline gates: ${summary.offlineOk ? "ok" : "failed"}`);
-  console.log(`OpenAI live smoke: ${summary.liveSmoke.status}`);
-  console.log(`OpenAI verified: ${summary.liveSmoke.verified ? "yes" : "no"}`);
-  console.log(`OpenAI command: ${summary.liveSmoke.command}`);
-  console.log(`OpenAI message: ${summary.liveSmoke.message}`);
+  const label = capitalize(summary.liveSmoke.provider ?? "provider");
+  console.log(`${label} live smoke: ${summary.liveSmoke.status}`);
+  console.log(`${label} verified: ${summary.liveSmoke.verified ? "yes" : "no"}`);
+  console.log(`${label} command: ${summary.liveSmoke.command}`);
+  console.log(`${label} message: ${summary.liveSmoke.message}`);
   console.log("");
   console.log("Steps:");
   for (const result of summary.results) {
     console.log(`- ${result.name}: ${result.ok ? "ok" : "failed"} (${result.exitCode ?? "unknown"})`);
   }
+}
+
+function requestedProvider(args) {
+  const index = args.indexOf("--provider");
+  if (index === -1) {
+    return undefined;
+  }
+  const value = args[index + 1];
+  if (value === "openai" || value === "anthropic" || value === "gemini") {
+    return value;
+  }
+  throw new Error(`Invalid acceptance provider "${value ?? ""}". Use openai, anthropic, or gemini.`);
+}
+
+function configuredProvider(environment) {
+  return Object.keys(PROVIDERS).find((name) => environment[PROVIDERS[name].apiKeyEnv]?.trim());
+}
+
+function capitalize(value) {
+  return value === "openai" ? "OpenAI" : `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }

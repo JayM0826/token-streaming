@@ -15,6 +15,8 @@
     "package:install-check": "node scripts/check-packed-install.mjs",
     "acceptance:check": "node scripts/check-acceptance.mjs",
     "smoke:openai": "node scripts/smoke-openai.mjs",
+    "smoke:anthropic": "node scripts/smoke-anthropic.mjs",
+    "smoke:gemini": "node scripts/smoke-gemini.mjs",
     "dev": "pnpm --filter @token-streaming/cli dev",
     "cli": "pnpm --filter @token-streaming/cli start"
   },
