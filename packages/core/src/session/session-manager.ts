@@ -12,8 +12,8 @@ export class SessionManager {
     };
   }
 
-  createEventLog(session: Session): EventLog {
-    return new EventLog(session.repoRoot, session.id);
+  createEventLog(session: Session, onEvent?: (event: SessionEvent) => void | Promise<void>): EventLog {
+    return new EventLog(session.repoRoot, session.id, onEvent);
   }
 
   createEvent<T extends Omit<SessionEvent, "id" | "timestamp">>(event: T): T & Pick<SessionEvent, "id" | "timestamp"> {

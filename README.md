@@ -7,12 +7,12 @@ The first implementation focuses on one real orchestration strategy: `default`.
 ## Core Ideas
 
 - Keep the runtime headless and reusable.
-- Treat `.ai/`, `module.yaml`, and `flow.yaml` as first-class repository context.
+- Treat `.ai/`, per-module `README.md` plus `module.yaml`, and workflow `README.md` plus `flow.yaml` as first-class repository context.
 - Use event-sourced sessions so every run can be inspected and replayed, including explicit `run.started` and `context.built` lifecycle records.
 - Apply edits through a patch/checkpoint boundary.
 - Leave room for future strategies and product modes without implementing them all up front.
 
-See [docs/implementation-plan.md](docs/implementation-plan.md) for the full plan, [docs/codex-build-brief.zh.md](docs/codex-build-brief.zh.md) for the Chinese product/engineering brief, and [docs/v1-acceptance-matrix.md](docs/v1-acceptance-matrix.md) for requirement-by-requirement verification evidence.
+See [docs/implementation-plan.md](docs/implementation-plan.md) for the full plan, [docs/codex-build-brief.zh.md](docs/codex-build-brief.zh.md) for the Chinese product/engineering brief, [docs/v1-completion-audit.zh.md](docs/v1-completion-audit.zh.md) for the current completion decision, and [docs/v1-acceptance-matrix.md](docs/v1-acceptance-matrix.md) for requirement-by-requirement verification evidence.
 
 ## Development
 
@@ -29,9 +29,9 @@ node apps/cli/dist/index.js --version
 ```
 
 `pnpm test` compiles all workspace packages and then runs the Node.js behavior tests in `packages/**/*.test.mjs` and `apps/**/*.test.mjs` against the compiled `dist` output.
-`pnpm package:check` verifies release readiness for the CLI and workspace packages: package metadata, dist entrypoints, type declarations, package file allowlists, Node engine constraints, and CLI bin shebangs.
+`pnpm package:check` verifies release readiness for the CLI and workspace packages: module READMEs, package metadata, dist entrypoints, type declarations, package file allowlists, Node engine constraints, and CLI bin shebangs.
 `pnpm package:install-check` packs all seven workspace packages, installs the tarballs in an isolated offline consumer, verifies the CLI bin shim, and smoke-tests both the installed CLI and the public headless core API.
-`pnpm acceptance:check` runs the offline gates and, when `OPENAI_API_KEY` is present, performs its own live provider probe. Without a key, it exits incomplete with a machine-readable `missing-api-key` status.
+`pnpm acceptance:check` runs the offline gates, including a deterministic end-to-end stub run, and performs its own live provider probe when `OPENAI_API_KEY` is present. Without a key, it exits incomplete with a machine-readable `missing-api-key` status.
 
 ## Headless Core API
 
@@ -40,7 +40,11 @@ The CLI is only the first host. A future desktop app can import the same runtime
 ```ts
 import { TokenStreamingRuntime } from "@token-streaming/core";
 
-const runtime = new TokenStreamingRuntime({ repoRoot: process.cwd(), mode: "auto" });
+const runtime = new TokenStreamingRuntime({
+  repoRoot: process.cwd(),
+  mode: "auto",
+  onEvent: (event) => console.log(event.type)
+});
 const plan = await runtime.planTask("fix checkout failure");
 const context = await runtime.inspectContext("fix checkout failure");
 const validation = await runtime.validateManifest();

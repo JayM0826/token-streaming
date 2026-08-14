@@ -2,7 +2,7 @@
 import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
+import { stderr as errorOutput, stdin as input } from "node:process";
 import {
   findPlaybook,
   generateFallbackManifest,
@@ -950,11 +950,11 @@ function createApprovalHost(mode: ApprovalMode): ApprovalHost {
 
 class PromptApprovalHost implements ApprovalHost {
   async requestApproval(request: ApprovalRequest): Promise<ApprovalResponse> {
-    const rl = createInterface({ input, output });
+    const rl = createInterface({ input, output: errorOutput });
     try {
-      console.log(`Approval required for ${request.target}: ${request.action}`);
+      errorOutput.write(`Approval required for ${request.target}: ${request.action}\n`);
       for (const reason of request.reasons) {
-        console.log(`- ${reason}`);
+        errorOutput.write(`- ${reason}\n`);
       }
       const answer = (await rl.question("Approve? [y/N] ")).trim().toLowerCase();
       const approved = answer === "y" || answer === "yes";

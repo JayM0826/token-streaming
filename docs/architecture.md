@@ -130,6 +130,7 @@ The tools package exposes a stable catalog before exposing arbitrary tool execut
 - Tool risk is classified as `read`, `write`, or `execute`.
 - The catalog includes repository scan, repository search, file read, git status, git diff, command run, test run, and patch apply.
 - Write and execute tools remain behind runtime permission, checkpoint, and verification boundaries.
+- Shell execution defaults to a 120-second timeout and a combined 1 MB stdout/stderr capture limit. Timeout and truncation are explicit result fields; either condition makes verification fail and is summarized for repair/review context.
 
 ## Session And Rollback
 
@@ -238,6 +239,12 @@ Model selection is policy-driven but still user-overridable.
 `doctor repo` aggregates the read-only health checks that matter before an agent run: repository scan, manifest validation, model readiness, OpenAI live-smoke readiness, current git status, local storage history, and tool catalog readiness. Its JSON output publishes the OpenAI smoke command/status plus latest session/report summaries with status fields and stable `latest` inspection commands for sessions, reports, and checkpoints so a future desktop host can open the newest artifacts without reimplementing CLI routing. It does not run tests, apply patches, create sessions, or call a model unless `--probe` is explicitly passed through to the model doctor.
 
 `doctor repo --json` exposes this aggregate status as structured data for automation and future desktop status panels.
+
+Interactive approval prompts are written to stderr so `--json` stdout remains a single machine-readable document for CLI automation and future desktop hosts. Approval responses and terminal success/failure remain recorded in the session event log and report.
+
+Headless hosts can pass an `onEvent` observer to `TokenStreamingRuntime`. Events are delivered without backpressure only after the append-only JSONL write succeeds, and observer failures are isolated from the durable run so a slow or broken desktop renderer cannot stall or corrupt execution history.
+
+Successful and failed runs emit exactly one terminal event. Reviewer output is persisted before `run.completed` or `run.failed`, so hosts can treat the terminal event as the final event in a session timeline.
 
 ## Source Context
 

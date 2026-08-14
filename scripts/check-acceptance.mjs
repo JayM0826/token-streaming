@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 const quick = process.argv.includes("--quick");
 const json = process.argv.includes("--json");
@@ -16,6 +17,18 @@ const steps = [
   ["package", [process.execPath, "scripts/check-package-readiness.mjs"]],
   ["packed-install", [process.execPath, "scripts/check-packed-install.mjs"]],
   ["manifest", [process.execPath, "apps/cli/dist/index.js", "manifest", "validate", "--json"]],
+  [
+    "stub-smoke",
+    [
+      process.execPath,
+      "apps/cli/dist/index.js",
+      "--provider",
+      "stub",
+      "--dry-run",
+      "--json",
+      "Summarize this repository for the deterministic acceptance smoke."
+    ]
+  ],
   ["repository-doctor", repositoryDoctorArgs]
 ];
 
@@ -29,11 +42,14 @@ for (const [name, command] of steps) {
   if (name === "repository-doctor") {
     liveSmoke = parsed?.liveSmoke;
   }
+  const validation = validateStepOutput(name, parsed);
   results.push({
     name,
     command: command.join(" "),
-    ok: result.status === 0,
+    ok: result.status === 0 && validation.ok,
     exitCode: result.status,
+    ...(validation.evidence ? { evidence: validation.evidence } : {}),
+    ...(validation.message ? { validationMessage: validation.message } : {}),
     outputSummary: summarize(output)
   });
 }
@@ -120,6 +136,51 @@ function parseJson(value) {
     return JSON.parse(value);
   } catch {
     return undefined;
+  }
+}
+
+function validateStepOutput(name, parsed) {
+  if (name !== "stub-smoke") {
+    return { ok: true };
+  }
+
+  const modelCall = parsed?.modelCalls?.find((call) => call.provider === "stub");
+  const artifacts = inspectStubArtifacts(parsed);
+  const ok =
+    parsed?.kind === "run" &&
+    parsed?.session?.strategy === "default" &&
+    Boolean(modelCall) &&
+    parsed?.review?.verificationStatus === "not-run" &&
+    artifacts.eventLog &&
+    artifacts.report;
+
+  return {
+    ok,
+    evidence: {
+      provider: modelCall?.provider,
+      model: modelCall?.model,
+      strategy: parsed?.session?.strategy,
+      review: parsed?.review?.verificationStatus,
+      eventLog: artifacts.eventLog,
+      report: artifacts.report
+    },
+    ...(ok ? {} : { message: "Stub smoke did not return the required run, model-call, review, event-log, and report evidence." })
+  };
+}
+
+function inspectStubArtifacts(parsed) {
+  try {
+    const events = readFileSync(parsed.eventLogPath, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const report = readFileSync(parsed.reportPath, "utf8");
+    return {
+      eventLog: events.some((event) => event.type === "review.completed") && events.at(-1)?.type === "run.completed",
+      report: report.includes("## Review") && report.includes("## Model Calls")
+    };
+  } catch {
+    return { eventLog: false, report: false };
   }
 }
 

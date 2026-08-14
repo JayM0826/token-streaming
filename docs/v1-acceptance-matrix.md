@@ -1,19 +1,21 @@
 # V1 Acceptance Matrix
 
-This matrix maps the V1 requirements in `docs/codex-build-brief.zh.md` to current implementation evidence. The authoritative final gate is:
+This matrix maps the V1 requirements in `docs/codex-build-brief.zh.md` to current implementation evidence. The current completion decision and exact remaining external condition are recorded in `docs/v1-completion-audit.zh.md`.
+
+The authoritative final gate is:
 
 ```bash
 pnpm acceptance:check -- --json
 ```
 
-Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after all offline checks pass. With a key, it performs its own live provider probe and only succeeds when that probe is verified.
+Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after all offline checks pass, including a deterministic end-to-end stub provider smoke that proves run, review, event-log, and report creation. With a key, it performs its own live provider probe and only succeeds when that probe is verified.
 
 ## Required Capabilities
 
 | Requirement | Status | Evidence |
 | --- | --- | --- |
 | CLI host | Complete | `apps/cli/src/index.ts`; CLI JSON tests |
-| Headless core | Complete | direct `planTask`/`inspectContext`/`validateManifest`/`listTools`/`runTool`/`rollback` tests plus isolated packed-consumer smoke |
+| Headless core | Complete | direct `planTask`/`inspectContext`/`validateManifest`/`listTools`/`runTool`/`rollback` tests, durable `onEvent` host stream test, plus isolated packed-consumer smoke |
 | Session Manager | Complete | `packages/core/src/session`; session history tests |
 | Repo Scanner | Complete | `packages/tools/src/repo-scanner.ts`; tool tests |
 | `.ai/` manifest loader | Complete | `packages/ai-manifest/src/loader.ts`; loader tests |
@@ -30,11 +32,11 @@ Without `OPENAI_API_KEY`, the gate intentionally reports `missing-api-key` after
 | Event Log | Complete | append-only JSONL sessions, explicit `run.started` / `context.built` lifecycle events, and event-surface tests |
 | Run Report | Complete | success, runtime failure and initialization failure report tests |
 | Model Provider interface | Complete | protocol contract in `@token-streaming/protocol` |
-| Stub provider | Complete | deterministic offline runtime and CLI tests |
+| Stub provider | Complete | deterministic offline runtime and CLI tests plus an explicit end-to-end acceptance smoke with review/event-log/report evidence |
 | OpenAI provider adapter | Complete, live pending | Responses and Chat Completions adapters; mock HTTP probe passes; bounded and key-redacted HTTP/transport diagnostics; external probe needs a key |
 | Strategy extension point | Complete | registry and injected custom-strategy tests |
 | Mode extension point | Complete | economy low-reasoning/light-context/light-verification, auto risk review, and max high-reasoning/required-review tests |
-| Module/workflow manifests | Complete | loader, validator, context and strategy selection tests |
+| Module/workflow manifests | Complete | every maintained module has `README.md` plus `module.yaml`; workflows have `README.md` plus `flow.yaml`; loader, validator, context and strategy selection tests |
 
 ## Behavioral Acceptance
 

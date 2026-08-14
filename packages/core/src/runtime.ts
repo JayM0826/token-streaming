@@ -50,7 +50,10 @@ export interface RuntimeOptions {
   strategies?: OrchestrationStrategy[];
   modelProvider?: ModelProvider;
   approvalHost?: ApprovalHost;
+  onEvent?: RuntimeEventHandler;
 }
+
+export type RuntimeEventHandler = (event: SessionEvent) => void | Promise<void>;
 
 export interface RunTaskOptions {
   task: string;
@@ -121,6 +124,7 @@ export class TokenStreamingRuntime {
   private readonly repoRoot: string;
   private readonly mode: ProductMode;
   private readonly modeProfile: ModeProfile;
+  private readonly onEvent?: RuntimeEventHandler;
 
   constructor(options: RuntimeOptions) {
     this.repoRoot = path.resolve(options.repoRoot);
@@ -129,6 +133,7 @@ export class TokenStreamingRuntime {
     this.strategy = new StrategyRegistry(options.strategies).resolve(options.strategy ?? "default");
     this.modelProvider = options.modelProvider ?? new StubModelProvider();
     this.approvalHost = options.approvalHost ?? new DenyApprovalHost();
+    this.onEvent = options.onEvent;
   }
 
   async previewPlan(task: string): Promise<PlanPreviewResult> {
@@ -221,7 +226,7 @@ export class TokenStreamingRuntime {
 
   async runTask(options: RunTaskOptions): Promise<RunTaskResult> {
     const session = this.sessionManager.create(this.repoRoot, { mode: this.mode, strategy: this.strategy.id });
-    const eventLog = this.sessionManager.createEventLog(session);
+    const eventLog = this.sessionManager.createEventLog(session, this.onEvent);
     const checkpointStore = new CheckpointStore(this.repoRoot);
     const reportStore = new RunReportStore(this.repoRoot);
 
@@ -290,6 +295,8 @@ export class TokenStreamingRuntime {
         );
         reviewRecorded = true;
       }
+
+      await this.appendRunFailed(eventLog, session.id, failureMessage);
 
       await reportStore.write({
         session,
@@ -455,9 +462,6 @@ export class TokenStreamingRuntime {
         );
       }
     } catch (error) {
-      if (!isRecordedRuntimeFailure(error)) {
-        await this.appendRunFailed(eventLog, session.id, formatErrorMessage(error));
-      }
       await writeFailureReport(error);
       throw error;
     }
@@ -645,7 +649,6 @@ export class TokenStreamingRuntime {
     };
     const [gitDiff, gitStatus] = await Promise.all([safeGitDiff(this.repoRoot), safeGitStatus(this.repoRoot)]);
 
-    await this.appendRunFailed(eventLog, session.id, failureMessage);
     await eventLog.append(
       this.sessionManager.createEvent({
         type: "review.completed",
@@ -653,6 +656,7 @@ export class TokenStreamingRuntime {
         review
       })
     );
+    await this.appendRunFailed(eventLog, session.id, failureMessage);
     await reportStore.write({
       session,
       repo,
@@ -684,7 +688,6 @@ export class TokenStreamingRuntime {
       response = await this.modelProvider.generate(input.request);
     } catch (error) {
       const failureMessage = `Model call failed during ${input.purpose}: ${formatErrorMessage(error)}`;
-      await this.appendRunFailed(input.eventLog, input.sessionId, failureMessage);
       throw new Error(failureMessage);
     }
 
@@ -880,7 +883,6 @@ export class TokenStreamingRuntime {
     if (!decision.allowed) {
       if (!decision.requiresApproval) {
         const error = `Patch blocked by policy: ${decision.reasons.join("; ")}`;
-        await this.appendRunFailed(input.eventLog, input.session.id, error);
         throw new Error(error);
       }
 
@@ -912,7 +914,6 @@ export class TokenStreamingRuntime {
 
       if (!approvalResponse.approved) {
         const error = `Patch blocked by approval: ${approvalResponse.reason ?? decision.reasons.join("; ")}`;
-        await this.appendRunFailed(input.eventLog, input.session.id, error);
         throw new Error(error);
       }
     }
@@ -971,7 +972,6 @@ export class TokenStreamingRuntime {
       if (!decision.allowed) {
         if (!decision.requiresApproval) {
           const error = `Command blocked by policy: ${decision.reasons.join("; ")}`;
-          await this.appendRunFailed(eventLog, sessionId, error);
           throw new Error(error);
         }
 
@@ -1003,7 +1003,6 @@ export class TokenStreamingRuntime {
 
         if (!approvalResponse.approved) {
           const error = `Command blocked by approval: ${approvalResponse.reason ?? decision.reasons.join("; ")}`;
-          await this.appendRunFailed(eventLog, sessionId, error);
           throw new Error(error);
         }
       }
@@ -1025,10 +1024,10 @@ export class TokenStreamingRuntime {
       })) as CommandResult;
 
       const verification: VerificationResult = {
-        ok: testResult.exitCode === 0,
+        ok: testResult.exitCode === 0 && !testResult.timedOut && !testResult.outputLimitExceeded,
         command: testResult.command,
         exitCode: testResult.exitCode,
-        outputSummary: summarizeOutput(testResult.stdout, testResult.stderr)
+        outputSummary: summarizeCommandResult(testResult)
       };
       toolCalls.push({
         name: "test.run",
@@ -1135,8 +1134,12 @@ function buildReviewSummary(input: {
   };
 }
 
-function summarizeOutput(stdout: string, stderr: string): string {
-  const output = `${stdout}\n${stderr}`.trim();
+function summarizeCommandResult(result: CommandResult): string {
+  const diagnostics = [
+    result.timedOut ? "Command timed out." : undefined,
+    result.outputLimitExceeded ? "Command output exceeded the capture limit." : undefined
+  ].filter((value): value is string => Boolean(value));
+  const output = [diagnostics.join(" "), result.stdout, result.stderr].filter(Boolean).join("\n").trim();
   if (output.length <= 1_000) {
     return output;
   }
@@ -1376,14 +1379,4 @@ function trimHistoryText(value: string | undefined, maxLength: number): string |
     return undefined;
   }
   return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength)}...`;
-}
-
-function isRecordedRuntimeFailure(error: unknown): boolean {
-  const message = formatErrorMessage(error);
-  return (
-    message.startsWith("Model call failed during ") ||
-    message.startsWith("Patch blocked by policy: ") ||
-    message.startsWith("Patch blocked by approval: ") ||
-    message.startsWith("Command blocked by policy: ")
-  );
 }

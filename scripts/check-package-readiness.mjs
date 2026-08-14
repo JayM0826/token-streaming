@@ -45,6 +45,7 @@ async function checkPackage(entry) {
   expect(Array.isArray(manifest.files) && manifest.files.includes("dist"), `${entry.directory}: files must include dist.`);
   expect(manifest.engines?.node === ">=22", `${entry.directory}: engines.node must be >=22.`);
 
+  await expectFile(path.join(packageRoot, "README.md"), `${entry.directory}: missing module README.md.`);
   await expectFile(path.join(packageRoot, "dist", "index.js"), `${entry.directory}: missing dist/index.js. Run pnpm build.`);
   await expectFile(path.join(packageRoot, "dist", "index.d.ts"), `${entry.directory}: missing dist/index.d.ts. Run pnpm build.`);
 

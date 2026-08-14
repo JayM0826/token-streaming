@@ -28,6 +28,14 @@ test("acceptance check reports missing OpenAI live smoke as incomplete", () => {
   assert.equal(output.liveSmoke.verified, false);
   assert.equal(output.results.some((step) => step.name === "package" && step.ok), true);
   assert.equal(output.results.some((step) => step.name === "manifest" && step.ok), true);
+  assert.deepEqual(output.results.find((step) => step.name === "stub-smoke")?.evidence, {
+    provider: "stub",
+    model: "stub",
+    strategy: "default",
+    review: "not-run",
+    eventLog: true,
+    report: true
+  });
   assert.equal(output.results.some((step) => step.name === "repository-doctor" && step.ok), true);
 });
 
@@ -62,6 +70,7 @@ test("acceptance check verifies Responses and Chat Completions provider probes",
       assert.equal(output.liveSmoke.model, "relay-model");
       assert.equal(output.liveSmoke.timeoutMs, 30_000);
       assert.equal(output.liveSmoke.endpoint, `http://127.0.0.1:${port}/v1/${endpoint}`);
+      assert.equal(output.results.find((step) => step.name === "stub-smoke")?.evidence?.provider, "stub");
       assert.doesNotMatch(output.results.find((step) => step.name === "repository-doctor")?.command ?? "", /--probe/);
       assert.match(output.results.find((step) => step.name === "live-smoke")?.command ?? "", /--probe/);
     }

@@ -88,7 +88,11 @@ export function listToolCatalog(): ToolCatalogEntry[] {
         command: stringSchema("Executed command."),
         exitCode: numberSchema("Process exit code or null."),
         stdout: stringSchema("Captured stdout."),
-        stderr: stringSchema("Captured stderr.")
+        stderr: stringSchema("Captured stderr."),
+        timedOut: booleanSchema("Whether the command exceeded its timeout."),
+        outputLimitExceeded: booleanSchema("Whether captured output exceeded the configured byte limit."),
+        stdoutTruncated: booleanSchema("Whether stdout was truncated."),
+        stderrTruncated: booleanSchema("Whether stderr was truncated.")
       })
     },
     {
@@ -103,7 +107,11 @@ export function listToolCatalog(): ToolCatalogEntry[] {
         command: stringSchema("Executed command."),
         exitCode: numberSchema("Process exit code or null."),
         stdout: stringSchema("Captured stdout."),
-        stderr: stringSchema("Captured stderr.")
+        stderr: stringSchema("Captured stderr."),
+        timedOut: booleanSchema("Whether the command exceeded its timeout."),
+        outputLimitExceeded: booleanSchema("Whether captured output exceeded the configured byte limit."),
+        stdoutTruncated: booleanSchema("Whether stdout was truncated."),
+        stderrTruncated: booleanSchema("Whether stderr was truncated.")
       })
     },
     {

@@ -160,6 +160,36 @@ test("TokenStreamingRuntime records run start and built context lifecycle events
   }
 });
 
+test("TokenStreamingRuntime streams durable events to a headless host observer", async () => {
+  const repoRoot = await createRepo();
+  try {
+    const observed = [];
+    const runtime = new TokenStreamingRuntime({
+      repoRoot,
+      modelProvider: new RecordingProvider(),
+      async onEvent(event) {
+        observed.push(event);
+        throw new Error("host rendering failed");
+      }
+    });
+
+    const result = await runtime.runTask({ task: "summarize observable events", dryRun: true });
+    const persisted = (await readFile(result.eventLogPath, "utf8"))
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+
+    assert.equal(result.review.recommendation, "Ready for human review.");
+    assert.deepEqual(
+      observed.map((event) => [event.id, event.type]),
+      persisted.map((event) => [event.id, event.type])
+    );
+    assert.equal(observed.at(-1)?.type, "run.completed");
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("TokenStreamingRuntime can run optional parallel role agents before planning", async () => {
   const repoRoot = await createRepo();
   try {
@@ -214,10 +244,8 @@ test("TokenStreamingRuntime records run.failed when the model provider throws", 
       .map((line) => JSON.parse(line));
 
     assert.equal(events.some((event) => event.type === "model.called"), false);
-    assert.equal(
-      events.some((event) => event.type === "run.failed" && /Model call failed during planning: provider exploded/.test(event.error)),
-      true
-    );
+    assertSingleTerminalFailure(events);
+    assert.match(events.at(-1).error, /Model call failed during planning: provider exploded/);
     assert.equal(
       events.some(
         (event) =>
@@ -267,8 +295,13 @@ test("TokenStreamingRuntime records a report when initialization fails", async (
     assert.equal(reportFiles.length, 1);
 
     const eventLog = await readFile(path.join(repoRoot, ".token-streaming", "sessions", sessionFiles[0]), "utf8");
+    const events = eventLog
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
     const report = await readFile(path.join(repoRoot, ".token-streaming", "reports", reportFiles[0]), "utf8");
-    assert.equal(JSON.parse(eventLog.split(/\r?\n/).find(Boolean)).type, "run.started");
+    assert.equal(events[0].type, "run.started");
+    assertSingleTerminalFailure(events);
     assert.match(eventLog, /"type":"run.failed"/);
     assert.match(eventLog, /Run failed during initialization: strategy initialization exploded/);
     assert.match(eventLog, /"type":"review.completed"/);
@@ -301,6 +334,7 @@ test("TokenStreamingRuntime records run.failed when a patch proposal cannot be p
       .map((line) => JSON.parse(line));
 
     assert.equal(events.some((event) => event.type === "model.called"), true);
+    assertSingleTerminalFailure(events);
     assert.equal(events.some((event) => event.type === "run.failed" && /Unexpected end of JSON input/.test(event.error)), true);
     assert.equal(
       events.some(
@@ -473,6 +507,13 @@ class SequenceProvider {
       usage: response.usage
     };
   }
+}
+
+function assertSingleTerminalFailure(events) {
+  const failureIndexes = events.flatMap((event, index) => (event.type === "run.failed" ? [index] : []));
+  const reviewIndex = events.findIndex((event) => event.type === "review.completed");
+  assert.deepEqual(failureIndexes, [events.length - 1]);
+  assert.equal(reviewIndex >= 0 && reviewIndex < failureIndexes[0], true);
 }
 
 class ThrowingProvider {

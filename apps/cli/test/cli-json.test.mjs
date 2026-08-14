@@ -1115,6 +1115,57 @@ test("CLI allows sensitive patch proposals with explicit approval and records po
   assert.equal(writtenContent, "# Secret\n");
 });
 
+test("CLI prompt approval preserves JSON stdout and records an approved sensitive patch", async () => {
+  const cwd = await createManifestRepo();
+  await writeFile(path.join(cwd, ".ai", "safety.yaml"), "sensitive_paths:\n  - secrets\n", "utf8");
+  const proposalPath = path.join(cwd, "proposal.json");
+  await writePatchProposal(proposalPath, "Write prompted config.", "secrets/config.md", "# Prompted\n");
+
+  const result = runCliRawWithInput(
+    ["-C", cwd, "--provider", "stub", "--patch-file", proposalPath, "--apply", "--approval", "prompt", "--dry-run", "--json", "write secret"],
+    "y\n"
+  );
+  const output = JSON.parse(result.stdout);
+  const session = runCli(["-C", cwd, "sessions", "show", output.session.id, "--json"]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Approval required for patch/);
+  assert.match(result.stderr, /Approve\? \[y\/N\]/);
+  assert.deepEqual(output.appliedFiles, ["secrets/config.md"]);
+  assert.equal(output.approvalResponses[0]?.approved, true);
+  assert.equal(output.approvalResponses[0]?.mode, "prompt");
+  assert.equal(session.events.some((event) => event.type === "approval.requested"), true);
+  assert.equal(session.events.some((event) => event.type === "approval.resolved" && event.response.approved === true), true);
+  assert.equal(await readFile(path.join(cwd, "secrets", "config.md"), "utf8"), "# Prompted\n");
+});
+
+test("CLI prompt rejection preserves JSON stdout and records run.failed without writing", async () => {
+  const cwd = await createManifestRepo();
+  await writeFile(path.join(cwd, ".ai", "safety.yaml"), "sensitive_paths:\n  - secrets\n", "utf8");
+  const proposalPath = path.join(cwd, "proposal.json");
+  await writePatchProposal(proposalPath, "Reject prompted config.", "secrets/config.md", "# Rejected\n");
+
+  const result = runCliRawWithInput(
+    ["-C", cwd, "--provider", "stub", "--patch-file", proposalPath, "--apply", "--approval", "prompt", "--dry-run", "--json", "write secret"],
+    "n\n"
+  );
+  const error = JSON.parse(result.stdout);
+  const session = runCli(["-C", cwd, "sessions", "show", error.artifacts.sessionId, "--json"]);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Approval required for patch/);
+  assert.match(error.message, /Patch blocked by approval/);
+  assert.equal(session.events.some((event) => event.type === "approval.resolved" && event.response.approved === false), true);
+  assert.equal(session.events.filter((event) => event.type === "run.failed").length, 1);
+  assert.equal(session.events.at(-1)?.type, "run.failed");
+  assert.equal(
+    session.events.findIndex((event) => event.type === "review.completed") < session.events.findIndex((event) => event.type === "run.failed"),
+    true
+  );
+  assert.equal(session.events.some((event) => event.type === "checkpoint.created"), false);
+  await assert.rejects(readFile(path.join(cwd, "secrets", "config.md"), "utf8"), /ENOENT/);
+});
+
 async function createManifestRepo() {
   const cwd = await mkdtemp(path.join(tmpdir(), "token-streaming-cli-json-"));
   await mkdir(path.join(cwd, ".ai", "playbooks"), { recursive: true });
@@ -1304,6 +1355,16 @@ function runCliRaw(args, env = {}) {
     env: { ...process.env, OPENAI_MODEL: "", OPENAI_TIMEOUT_MS: "", ...env },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
+  });
+}
+
+function runCliRawWithInput(args, stdin, env = {}) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
+    cwd: repoRoot,
+    env: { ...process.env, OPENAI_MODEL: "", OPENAI_TIMEOUT_MS: "", ...env },
+    encoding: "utf8",
+    input: stdin,
+    stdio: ["pipe", "pipe", "pipe"]
   });
 }
 
