@@ -3,8 +3,11 @@ import { AnthropicMessagesProvider, DEFAULT_ANTHROPIC_MODEL } from "./anthropic-
 import {
   CodexExecProvider,
   DEFAULT_CODEX_EXEC_TIMEOUT_MS,
+  DEFAULT_CODEX_EXEC_SERVICE_TIER,
+  DEFAULT_CODEX_EXEC_MODEL,
   detectCodexExec,
-  type CodexExecRunner
+  type CodexExecRunner,
+  type CodexExecServiceTier
 } from "./codex-exec-provider.js";
 import { DEFAULT_GEMINI_MODEL, GeminiInteractionsProvider } from "./gemini-provider.js";
 import { OpenAIChatCompletionsProvider } from "./openai-chat-provider.js";
@@ -28,6 +31,7 @@ export interface ProviderFactoryOptions {
   timeoutMs?: number;
   cwd?: string;
   codexExecPath?: string;
+  codexExecServiceTier?: CodexExecServiceTier;
   codexExecRunner?: CodexExecRunner;
   environment?: ProviderEnvironment;
 }
@@ -48,6 +52,7 @@ export interface ResolvedProviderConfig {
   executableFound?: boolean;
   executableSource?: "configured" | "desktop" | "path" | "missing";
   searchedExecutablePaths?: string[];
+  serviceTier?: CodexExecServiceTier;
 }
 
 interface CommercialProviderDefinition {
@@ -64,6 +69,7 @@ export const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
 export const MAX_OPENAI_TIMEOUT_MS = 600_000;
 export const MAX_PROVIDER_TIMEOUT_MS = 600_000;
 export const DEFAULT_OPENAI_MODEL = "gpt-5.5";
+export const DEFAULT_PROVIDER_NAME: ProviderName = "codex";
 export const COMMERCIAL_PROVIDER_NAMES: readonly CommercialProviderName[] = ["openai", "anthropic", "gemini"];
 
 const DEFINITIONS: Record<CommercialProviderName, CommercialProviderDefinition> = {
@@ -100,11 +106,12 @@ export function createModelProvider(options: ProviderFactoryOptions = {}): Model
   }
   if (config.provider === "codex") {
     if (!config.executablePath || !config.executableFound) {
-      throw new Error("A runnable Codex executable is required when --provider codex is selected. Set CODEX_EXEC_PATH if auto-detection cannot find it.");
+      throw new Error("A runnable Codex executable is required when the Codex provider is selected. Set CODEX_EXEC_PATH if auto-detection cannot find it.");
     }
     return new CodexExecProvider({
       executablePath: config.executablePath,
       model: config.model,
+      serviceTier: config.serviceTier,
       cwd: config.cwd,
       timeoutMs: config.timeoutMs,
       environment: options.environment,
@@ -126,7 +133,7 @@ export function createModelProvider(options: ProviderFactoryOptions = {}): Model
 
 export function resolveProviderConfig(options: ProviderFactoryOptions = {}): ResolvedProviderConfig {
   const environment = options.environment ?? process.env;
-  const requestedProvider = options.provider ?? "auto";
+  const requestedProvider = options.provider ?? DEFAULT_PROVIDER_NAME;
   const provider = resolveEffectiveProviderName(requestedProvider, { model: options.model, apiKey: options.apiKey, environment });
 
   if (provider === "stub") {
@@ -137,9 +144,10 @@ export function resolveProviderConfig(options: ProviderFactoryOptions = {}): Res
     return {
       requestedProvider,
       provider,
-      model: normalizedValue(options.model) ?? normalizedValue(environment.CODEX_EXEC_MODEL),
+      model: normalizedValue(options.model) ?? normalizedValue(environment.CODEX_EXEC_MODEL) ?? DEFAULT_CODEX_EXEC_MODEL,
+      serviceTier: resolveCodexExecServiceTier(options.codexExecServiceTier ?? environment.CODEX_EXEC_SERVICE_TIER),
       timeoutMs: resolveProviderTimeoutMs(options.timeoutMs ?? environment.CODEX_EXEC_TIMEOUT_MS, provider),
-      optionalEnv: ["CODEX_EXEC_PATH", "CODEX_EXEC_MODEL", "CODEX_EXEC_TIMEOUT_MS"],
+      optionalEnv: ["CODEX_EXEC_PATH", "CODEX_EXEC_MODEL", "CODEX_EXEC_SERVICE_TIER", "CODEX_EXEC_TIMEOUT_MS"],
       cwd: options.cwd,
       executablePath: detection.executablePath,
       executableFound: detection.found,
@@ -219,6 +227,13 @@ export function resolveOpenAIApiProtocol(value: string | undefined): OpenAIApiPr
 
 export function resolveOpenAITimeoutMs(value: number | string | undefined = process.env.OPENAI_TIMEOUT_MS): number {
   return resolveProviderTimeoutMs(value, "openai");
+}
+
+export function resolveCodexExecServiceTier(value: string | undefined): CodexExecServiceTier {
+  const normalized = normalizedValue(value);
+  if (!normalized) return DEFAULT_CODEX_EXEC_SERVICE_TIER;
+  if (normalized === "fast" || normalized === "flex") return normalized;
+  throw new Error(`Invalid Codex exec service tier "${value}". Use fast or flex.`);
 }
 
 export function resolveProviderTimeoutMs(value: number | string | undefined, provider: CommercialProviderName | LocalProviderName): number {

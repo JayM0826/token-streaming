@@ -57,7 +57,7 @@ test("availableProviderNames reports only configured commercial providers", () =
   assert.deepEqual(availableProviderNames({ ANTHROPIC_API_KEY: "a", GEMINI_API_KEY: "" }), ["stub", "anthropic"]);
 });
 
-test("factory uses Codex only when explicitly selected and never as the API auto fallback", () => {
+test("factory keeps Codex outside the explicit API auto fallback", () => {
   const runner = async () => ({ exitCode: 0, stdout: "", stderr: "", finalMessage: "ok" });
   const codex = createModelProvider({
     provider: "codex",
@@ -75,6 +75,7 @@ test("factory uses Codex only when explicitly selected and never as the API auto
   assert.equal(config.provider, "codex");
   assert.equal(config.model, "gpt-local");
   assert.equal(config.timeoutMs, 45_000);
+  assert.equal(config.serviceTier, "fast");
   assert.equal(config.executableFound, true);
   assert.equal(config.executableSource, "configured");
   assert.equal(
@@ -82,6 +83,35 @@ test("factory uses Codex only when explicitly selected and never as the API auto
     true
   );
   assert.deepEqual(availableProviderNames({ CODEX_EXEC_PATH: process.execPath }), ["stub"]);
+});
+
+test("factory validates and exposes the Codex service tier override", () => {
+  const config = resolveProviderConfig({
+    provider: "codex",
+    codexExecPath: process.execPath,
+    environment: { CODEX_EXEC_SERVICE_TIER: "flex" }
+  });
+  assert.equal(config.serviceTier, "flex");
+  assert.throws(
+    () => resolveProviderConfig({ provider: "codex", codexExecPath: process.execPath, environment: { CODEX_EXEC_SERVICE_TIER: "default" } }),
+    /Use fast or flex/
+  );
+});
+
+test("factory defaults to Codex while explicit auto remains API-key routed", () => {
+  const runner = async () => ({ exitCode: 0, stdout: "", stderr: "", finalMessage: "ok" });
+  const provider = createModelProvider({
+    codexExecPath: process.execPath,
+    codexExecRunner: runner,
+    environment: {}
+  });
+  const config = resolveProviderConfig({ codexExecPath: process.execPath, environment: {} });
+
+  assert.equal(provider instanceof CodexExecProvider, true);
+  assert.equal(config.requestedProvider, "codex");
+  assert.equal(config.provider, "codex");
+  assert.equal(config.model, "gpt-5.5");
+  assert.equal(createModelProvider({ provider: "auto", environment: {} }) instanceof StubModelProvider, true);
 });
 
 test("factory rejects an explicitly selected missing Codex executable", () => {

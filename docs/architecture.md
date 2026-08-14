@@ -224,7 +224,7 @@ Model selection is policy-driven but still user-overridable.
 
 Provider-specific wire formats stop at `packages/providers`. The runtime consumes the shared `ModelProvider` request/response contract, while adapters translate it to OpenAI Responses or Chat Completions, Anthropic Messages, Gemini Interactions, local `codex exec`, or the deterministic stub. Authentication headers, base URLs, request shapes, process invocation, response text, token usage, timeout handling, and safe diagnostics remain adapter concerns.
 
-API transport is the default routing boundary: `auto` considers configured OpenAI, Anthropic, and Gemini credentials, then falls back to Stub. It never silently starts Codex. The local Codex adapter is explicit-only, auto-detects the desktop/PATH executable, validates `codex --version`, and invokes `codex exec` with ephemeral state, stdin, JSON events, a read-only sandbox, bounded output, timeout cleanup, and recursion protection. This keeps local account transport swappable without granting a nested agent direct write authority.
+Codex is the product default when no provider is specified. The local adapter auto-detects the desktop/PATH executable, validates `codex --version`, and invokes `codex exec` with ephemeral state, stdin, JSON events, a read-only sandbox, bounded output, timeout cleanup, and recursion protection. Explicit `--provider auto` remains an API-only routing boundary: it considers configured OpenAI, Anthropic, and Gemini credentials, then falls back to Stub. This keeps provider intent deterministic without granting a nested agent direct write authority.
 
 - CLI `--model` has the highest priority.
 - `.ai/models.yaml` can define `economy_model`, `auto_model`, `max_model`, `default_model`, and scored `model_candidates`.

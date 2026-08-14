@@ -10,6 +10,7 @@ type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
 export interface CodexExecProviderOptions {
   executablePath: string;
   model?: string;
+  serviceTier?: CodexExecServiceTier;
   cwd?: string;
   timeoutMs?: number;
   environment?: ProviderEnvironment;
@@ -36,6 +37,7 @@ export interface CodexExecRunResult {
 }
 
 export type CodexExecRunner = (options: CodexExecRunOptions) => Promise<CodexExecRunResult>;
+export type CodexExecServiceTier = "fast" | "flex";
 
 export interface CodexExecDetection {
   executablePath?: string;
@@ -51,6 +53,8 @@ export interface CodexExecInspection {
 }
 
 export const DEFAULT_CODEX_EXEC_TIMEOUT_MS = 300_000;
+export const DEFAULT_CODEX_EXEC_SERVICE_TIER: CodexExecServiceTier = "fast";
+export const DEFAULT_CODEX_EXEC_MODEL = "gpt-5.5";
 export const MAX_CODEX_EXEC_PROMPT_BYTES = 2 * 1024 * 1024;
 export const MAX_CODEX_EXEC_OUTPUT_BYTES = 1024 * 1024;
 
@@ -58,6 +62,7 @@ export class CodexExecProvider implements ModelProvider {
   readonly name = "codex";
   private readonly executablePath: string;
   private readonly model?: string;
+  private readonly serviceTier: CodexExecServiceTier;
   private readonly cwd: string;
   private readonly timeoutMs: number;
   private readonly environment: ProviderEnvironment;
@@ -65,7 +70,8 @@ export class CodexExecProvider implements ModelProvider {
 
   constructor(options: CodexExecProviderOptions) {
     this.executablePath = options.executablePath;
-    this.model = validateModel(options.model);
+    this.model = validateModel(options.model ?? DEFAULT_CODEX_EXEC_MODEL);
+    this.serviceTier = options.serviceTier ?? DEFAULT_CODEX_EXEC_SERVICE_TIER;
     this.cwd = path.resolve(options.cwd ?? process.cwd());
     this.timeoutMs = options.timeoutMs ?? DEFAULT_CODEX_EXEC_TIMEOUT_MS;
     this.environment = options.environment ?? process.env;
@@ -84,7 +90,7 @@ export class CodexExecProvider implements ModelProvider {
     try {
       const result = await this.runner({
         executablePath: this.executablePath,
-        args: buildCodexExecArgs(outputPath, this.model, input.reasoningEffort),
+        args: buildCodexExecArgs(outputPath, this.model, this.serviceTier, input.reasoningEffort),
         cwd: this.cwd,
         prompt,
         outputPath,
@@ -197,7 +203,12 @@ export async function runCodexExec(options: CodexExecRunOptions): Promise<CodexE
   };
 }
 
-function buildCodexExecArgs(outputPath: string, model: string | undefined, effort: ModelRequest["reasoningEffort"]): string[] {
+function buildCodexExecArgs(
+  outputPath: string,
+  model: string | undefined,
+  serviceTier: CodexExecServiceTier,
+  effort: ModelRequest["reasoningEffort"]
+): string[] {
   return [
     "exec",
     "--ephemeral",
@@ -210,6 +221,8 @@ function buildCodexExecArgs(outputPath: string, model: string | undefined, effor
     "--output-last-message",
     outputPath,
     ...(model ? ["--model", model] : []),
+    "--config",
+    `service_tier=${serviceTier}`,
     ...(effort ? ["--config", `model_reasoning_effort=${effort}`] : []),
     "-"
   ];
@@ -380,7 +393,7 @@ function formatCodexExecFailure(result: CodexExecRunResult, prefix = "Codex exec
 function sanitizeDiagnostic(value: string): string | undefined {
   const normalized = value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
   if (!normalized) return undefined;
-  return normalized.length <= 500 ? normalized : `${normalized.slice(0, 500)}...`;
+  return normalized.length <= 500 ? normalized : `...${normalized.slice(-500)}`;
 }
 
 async function readOptionalFile(filePath: string): Promise<string | undefined> {

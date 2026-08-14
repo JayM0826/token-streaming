@@ -27,6 +27,7 @@ import {
 import {
   availableProviderNames,
   createModelProvider,
+  DEFAULT_PROVIDER_NAME,
   diagnoseModelProvider,
   resolveEnvironmentModel,
   resolveModelSelection,
@@ -449,7 +450,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     cwd: process.env.INIT_CWD ?? process.cwd(),
     mode: "auto",
     strategy: "default",
-    provider: "auto",
+    provider: DEFAULT_PROVIDER_NAME,
     dryRun: false,
     apply: false,
     repair: false,
@@ -913,7 +914,7 @@ Options:
   -C, --cwd <path>       Repository root
   --mode <mode>          Product mode: economy, max, auto
   --strategy <id>        Orchestration strategy id, default: default
-  --provider <provider>  Provider: auto, openai, anthropic, gemini, codex, stub
+  --provider <provider>  Provider: codex (default), auto, openai, anthropic, gemini, stub
   --api-protocol <type>  OpenAI endpoint: responses, chat-completions
   --model <model>        Model name for the selected provider
   --patch-file <path>    Load a structured patch proposal from a JSON file
@@ -2411,6 +2412,7 @@ function publicProviderConnection(config: ReturnType<typeof resolveProviderConfi
     ...(config.executablePath ? { executablePath: config.executablePath } : {}),
     ...(config.executableFound !== undefined ? { executableFound: config.executableFound } : {}),
     ...(config.executableSource ? { executableSource: config.executableSource } : {}),
+    ...(config.serviceTier ? { serviceTier: config.serviceTier } : {}),
     ...(config.cwd ? { cwd: config.cwd } : {})
   };
 }

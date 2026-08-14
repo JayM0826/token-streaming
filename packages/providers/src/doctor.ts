@@ -3,6 +3,7 @@ import { inspectCodexExec, type CodexExecInspection, type CodexExecRunner } from
 import {
   availableProviderNames,
   createModelProvider,
+  DEFAULT_PROVIDER_NAME,
   resolveEnvironmentModel,
   resolveProviderConfig,
   type ConcreteProviderName,
@@ -48,6 +49,7 @@ export interface ModelDoctorConnection {
   executableFound?: boolean;
   executableSource?: "configured" | "desktop" | "path" | "missing";
   executableVersion?: string;
+  serviceTier?: "fast" | "flex";
   cwd?: string;
 }
 
@@ -68,7 +70,7 @@ export interface ModelDoctorCheck {
 
 export async function diagnoseModelProvider(options: ModelDoctorOptions): Promise<ModelDoctorResult> {
   const environment = options.environment ?? process.env;
-  const requestedProvider = options.requestedProvider ?? "auto";
+  const requestedProvider = options.requestedProvider ?? DEFAULT_PROVIDER_NAME;
   const availableProviders = availableProviderNames(environment);
   if (options.apiKey?.trim() && !availableProviders.includes("openai")) {
     availableProviders.push("openai");
@@ -261,6 +263,7 @@ function publicConnection(config: ResolvedProviderConfig, codexInspection?: Code
     ...(config.executableFound !== undefined ? { executableFound: config.executableFound } : {}),
     ...(config.executableSource ? { executableSource: config.executableSource } : {}),
     ...(codexInspection?.version ? { executableVersion: codexInspection.version } : {}),
+    ...(config.serviceTier ? { serviceTier: config.serviceTier } : {}),
     ...(config.cwd ? { cwd: config.cwd } : {})
   };
 }

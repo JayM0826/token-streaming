@@ -1,4 +1,4 @@
-default_provider: auto
+default_provider: codex
 economy_model: gpt-5.5-mini
 auto_model: gpt-5.5
 max_model: gpt-5.5

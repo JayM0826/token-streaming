@@ -110,6 +110,7 @@ pnpm cli -- --provider openai --model gpt-5.5 "plan this change"
 pnpm cli -- --provider anthropic --model claude-sonnet-5 "plan this change"
 pnpm cli -- --provider gemini --model gemini-3.6-flash "plan this change"
 pnpm cli -- --provider codex "plan this change"
+pnpm cli -- "plan this change with the default local Codex provider"
 pnpm cli -- --parallel-agents --dry-run "fix failing test"
 pnpm cli -- --patch-file proposal.json --apply "apply a proposed change"
 pnpm cli -- --patch-file proposal.json --apply --repair "apply and try one repair if verification fails"
@@ -160,9 +161,10 @@ pnpm acceptance:check -- --json
 
 Provider behavior:
 
-- `--provider auto` is the default.
+- `--provider codex` is the default. Omitting `--provider` automatically detects and uses the local Codex CLI.
+- `--provider auto` explicitly activates API-key routing.
 - `auto` routes only across API providers whose keys are available. Model prefixes (`gpt-*`, `claude-*`, `gemini-*`) take precedence; otherwise the deterministic key order is OpenAI, Anthropic, then Gemini.
-- `auto` never silently starts a local Codex process. Use `--provider codex` explicitly when that transport is wanted.
+- `auto` never starts a local Codex process, so users and CI can deliberately request API-only behavior.
 - `auto` falls back to the stub provider when no API key is present.
 - `--provider openai` requires `OPENAI_API_KEY`.
 - `--provider anthropic` requires `ANTHROPIC_API_KEY` and uses the native Messages API at `<base-url>/messages`.
@@ -174,7 +176,7 @@ Provider behavior:
 - `OPENAI_TIMEOUT_MS` sets the OpenAI-compatible request timeout in milliseconds (default `30000`, maximum `600000`).
 - Anthropic uses `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_TIMEOUT_MS`; defaults are `https://api.anthropic.com/v1` and `claude-sonnet-5`.
 - Gemini uses `GEMINI_BASE_URL`, `GEMINI_MODEL`, and `GEMINI_TIMEOUT_MS`; defaults are `https://generativelanguage.googleapis.com/v1` and `gemini-3.6-flash`.
-- Codex uses `CODEX_EXEC_PATH`, `CODEX_EXEC_MODEL`, and `CODEX_EXEC_TIMEOUT_MS`; the executable and model are normally auto-detected/configured by Codex, and the timeout defaults to `300000`.
+- Codex uses `CODEX_EXEC_PATH`, `CODEX_EXEC_MODEL`, `CODEX_EXEC_SERVICE_TIER`, and `CODEX_EXEC_TIMEOUT_MS`; the compatible model default is `gpt-5.5`, the service tier defaults to `fast` (`flex` is also supported), and the timeout defaults to `300000`.
 - A relay must expose either `<base-url>/responses` or `<base-url>/chat/completions`, matching the selected protocol.
 - `--model` overrides repository model policy.
 - `doctor repo` aggregates repository, manifest, model, git, storage, and tool readiness without running tests or calling a model by default.
@@ -205,8 +207,8 @@ Set these variables in the same terminal that launches the CLI. Do not write API
 Local Codex setup on Windows PowerShell:
 
 ```powershell
-pnpm cli -- --provider codex doctor models --json
-pnpm cli -- --provider codex doctor models --probe --json
+pnpm cli -- doctor models --json
+pnpm cli -- doctor models --probe --json
 pnpm smoke:codex
 ```
 
@@ -235,7 +237,7 @@ export OPENAI_TIMEOUT_MS="120000"
 pnpm cli -- --provider openai doctor models --probe --json
 pnpm acceptance:check -- --json
 ```
-- `pnpm acceptance:check -- --provider <openai|anthropic|gemini|codex> --json` is the final acceptance gate: offline quality checks plus the selected provider's live-smoke verification. Without `--provider`, the first configured API provider is selected deterministically; Codex remains explicit-only.
+- `pnpm acceptance:check -- --provider <openai|anthropic|gemini|codex> --json` is the final acceptance gate: offline quality checks plus the selected provider's live-smoke verification. The acceptance script still requires an explicit Codex selection before spending local account usage; its no-provider mode selects the first configured API provider deterministically.
 
 Mode behavior:
 

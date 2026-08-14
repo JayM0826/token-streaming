@@ -195,6 +195,7 @@ function cleanProviderEnvironment(overrides = {}) {
     "GEMINI_TIMEOUT_MS",
     "CODEX_EXEC_PATH",
     "CODEX_EXEC_MODEL",
+    "CODEX_EXEC_SERVICE_TIER",
     "CODEX_EXEC_TIMEOUT_MS",
     "CODEX_EXEC_PROVIDER_DEPTH"
   ]) {

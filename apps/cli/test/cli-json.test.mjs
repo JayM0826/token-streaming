@@ -219,7 +219,7 @@ test("CLI exposes effective configuration as JSON", async () => {
     "utf8"
   );
 
-  const output = runCli(["-C", cwd, "--mode", "auto", "--api-protocol", "chat-completions", "config", "inspect", "--json"], {
+  const output = runCli(["-C", cwd, "--provider", "auto", "--mode", "auto", "--api-protocol", "chat-completions", "config", "inspect", "--json"], {
     OPENAI_API_KEY: ""
   });
 
@@ -803,7 +803,7 @@ test("CLI exposes manifest model routing as JSON", async () => {
     "utf8"
   );
 
-  const output = runCli(["-C", cwd, "--mode", "economy", "models", "select", "--json"]);
+  const output = runCli(["-C", cwd, "--provider", "auto", "--mode", "economy", "models", "select", "--json"]);
 
   assert.equal(output.kind, "model-selection");
   assert.equal(output.mode, "economy");
@@ -831,7 +831,7 @@ test("CLI model routing scores explicit manifest candidates as JSON", async () =
     "utf8"
   );
 
-  const output = runCli(["-C", cwd, "--mode", "max", "models", "select", "--json"]);
+  const output = runCli(["-C", cwd, "--provider", "auto", "--mode", "max", "models", "select", "--json"]);
 
   assert.equal(output.kind, "model-selection");
   assert.equal(output.selection.source, "scored");
@@ -870,7 +870,7 @@ test("CLI model routing uses task-specific telemetry recommendations as JSON", a
     status: "failed"
   });
 
-  const output = runCli(["-C", cwd, "--mode", "auto", "models", "select", "fix", "failing", "test", "--json"]);
+  const output = runCli(["-C", cwd, "--provider", "auto", "--mode", "auto", "models", "select", "fix", "failing", "test", "--json"]);
 
   assert.equal(output.kind, "model-selection");
   assert.equal(output.task, "fix failing test");
@@ -898,7 +898,7 @@ test("CLI exposes model override routing as JSON", async () => {
 
 test("CLI exposes model doctor warnings as JSON", async () => {
   const cwd = await createManifestRepo();
-  const output = runCli(["-C", cwd, "doctor", "models", "--json"], { OPENAI_API_KEY: "" });
+  const output = runCli(["-C", cwd, "--provider", "auto", "doctor", "models", "--json"], { OPENAI_API_KEY: "" });
 
   assert.equal(output.kind, "model-doctor");
   assert.equal(output.ok, true);
@@ -935,15 +935,16 @@ test("CLI exposes model doctor errors as JSON with a non-zero exit code", async 
   assert.equal(output.checks.some((check) => check.name === "openai-api-key" && check.status === "error"), true);
 });
 
-test("CLI exposes explicit Codex exec configuration without changing API auto routing", async () => {
+test("CLI defaults to Codex without changing explicit API auto routing", async () => {
   const cwd = await createManifestRepo();
-  const codex = runCli(["-C", cwd, "--provider", "codex", "config", "inspect", "--json"], {
+  const codex = runCli(["-C", cwd, "config", "inspect", "--json"], {
     CODEX_EXEC_PATH: process.execPath,
     CODEX_EXEC_MODEL: "gpt-local"
   });
-  const automatic = runCli(["-C", cwd, "doctor", "models", "--json"], { CODEX_EXEC_PATH: process.execPath });
+  const automatic = runCli(["-C", cwd, "--provider", "auto", "doctor", "models", "--json"], { CODEX_EXEC_PATH: process.execPath });
 
   assert.equal(codex.effectiveProvider, "codex");
+  assert.equal(codex.provider, "codex");
   assert.equal(codex.providerConnection.transport, "local-exec");
   assert.equal(codex.providerConnection.executableFound, true);
   assert.equal(codex.providerConnection.executableSource, "configured");
@@ -983,7 +984,7 @@ test("CLI repository doctor does not mark a non-Codex executable as smoke-ready"
 test("CLI exposes repository doctor readiness as JSON", async () => {
   const cwd = await createManifestRepo();
   const run = runCli(["-C", cwd, "--provider", "stub", "--dry-run", "--json", "summarize this repo"]);
-  const output = runCli(["-C", cwd, "doctor", "repo", "--json"], { OPENAI_API_KEY: "" });
+  const output = runCli(["-C", cwd, "--provider", "auto", "doctor", "repo", "--json"], { OPENAI_API_KEY: "" });
 
   assert.equal(output.kind, "repository-doctor");
   assert.equal(output.ok, true);
@@ -1024,7 +1025,7 @@ test("CLI exposes repository doctor readiness as JSON", async () => {
 
 test("CLI exposes repository doctor manifest errors as JSON with a non-zero exit code", async () => {
   const cwd = await createIncompleteManifestRepo();
-  const result = runCliRaw(["-C", cwd, "doctor", "repo", "--json"], { OPENAI_API_KEY: "" });
+  const result = runCliRaw(["-C", cwd, "--provider", "auto", "doctor", "repo", "--json"], { OPENAI_API_KEY: "" });
   const output = JSON.parse(result.stdout);
 
   assert.equal(result.status, 1);
@@ -1423,7 +1424,7 @@ function cleanProviderEnvironment(overrides = {}) {
     "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS",
     "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_TIMEOUT_MS",
     "GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_TIMEOUT_MS",
-    "CODEX_EXEC_PATH", "CODEX_EXEC_MODEL", "CODEX_EXEC_TIMEOUT_MS", "CODEX_EXEC_PROVIDER_DEPTH"
+    "CODEX_EXEC_PATH", "CODEX_EXEC_MODEL", "CODEX_EXEC_SERVICE_TIER", "CODEX_EXEC_TIMEOUT_MS", "CODEX_EXEC_PROVIDER_DEPTH"
   ]) {
     environment[name] = "";
   }

@@ -45,10 +45,11 @@ test("CodexExecProvider sends a bounded stdin prompt through an ephemeral read-o
   assert.deepEqual(invocation.args.slice(invocation.args.indexOf("--sandbox"), invocation.args.indexOf("--sandbox") + 2), ["--sandbox", "read-only"]);
   assert.deepEqual(invocation.args.slice(invocation.args.indexOf("--model"), invocation.args.indexOf("--model") + 2), ["--model", "gpt-test"]);
   assert.equal(invocation.args.includes("model_reasoning_effort=high"), true);
+  assert.equal(invocation.args.includes("service_tier=fast"), true);
   assert.equal(invocation.args.at(-1), "-");
 });
 
-test("CodexExecProvider can use the model configured by Codex and parse JSONL fallback output", async () => {
+test("CodexExecProvider uses its compatible default model and parses JSONL fallback output", async () => {
   const provider = new CodexExecProvider({
     executablePath: process.execPath,
     runner: async () => ({
@@ -59,7 +60,7 @@ test("CodexExecProvider can use the model configured by Codex and parse JSONL fa
     })
   });
   const response = await provider.generate({ mode: "economy", messages: [{ role: "user", content: "hello" }] });
-  assert.equal(response.model, "codex-configured");
+  assert.equal(response.model, "gpt-5.5");
   assert.equal(response.content, "fallback answer");
 });
 
@@ -84,6 +85,25 @@ test("CodexExecProvider reports timeout, output limits, and nested invocation sa
     runner: async () => ({ exitCode: 0, stdout: "", stderr: "", finalMessage: "unreachable" })
   });
   await assert.rejects(() => nested.generate(request), /Nested Codex exec provider calls are disabled/);
+});
+
+test("CodexExecProvider keeps the actionable tail of long process diagnostics", async () => {
+  const provider = new CodexExecProvider({
+    executablePath: process.execPath,
+    runner: async () => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: `${"warning ".repeat(100)}final actionable failure`
+    })
+  });
+  await assert.rejects(
+    () => provider.generate({ mode: "auto", messages: [{ role: "user", content: "hello" }] }),
+    (error) => {
+      assert.match(error.message, /final actionable failure/);
+      assert.equal(error.message.length < 600, true);
+      return true;
+    }
+  );
 });
 
 test("detectCodexExec prioritizes an installed Codex desktop binary and honors explicit paths", () => {

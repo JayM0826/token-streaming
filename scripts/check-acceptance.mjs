@@ -16,7 +16,7 @@ const PROVIDERS = {
     environment: ["GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_TIMEOUT_MS"]
   },
   codex: {
-    environment: ["CODEX_EXEC_PATH", "CODEX_EXEC_MODEL", "CODEX_EXEC_TIMEOUT_MS", "CODEX_EXEC_PROVIDER_DEPTH"]
+    environment: ["CODEX_EXEC_PATH", "CODEX_EXEC_MODEL", "CODEX_EXEC_SERVICE_TIER", "CODEX_EXEC_TIMEOUT_MS", "CODEX_EXEC_PROVIDER_DEPTH"]
   }
 };
 
@@ -25,7 +25,7 @@ const json = process.argv.includes("--json");
 const explicitProvider = requestedProvider(process.argv.slice(2));
 const provider = explicitProvider ?? configuredProvider(process.env);
 const offlineEnvironment = withoutProviderEnvironment(process.env);
-const repositoryDoctorArgs = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--json"];
+const repositoryDoctorArgs = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--provider", "auto", "--json"];
 
 const steps = [
   ...(quick

@@ -25,9 +25,15 @@ test("scaffoldOfficialManifest creates the official AI manifest surface", async 
     assert.equal(existsSync(path.join(repoRoot, ".ai", "playbooks", "fix-failing-test.md")), true);
 
     const testsYaml = await readFile(path.join(repoRoot, ".ai", "tests.yaml"), "utf8");
+    const modelsYaml = await readFile(path.join(repoRoot, ".ai", "models.yaml"), "utf8");
+    const conventions = await readFile(path.join(repoRoot, ".ai", "conventions.md"), "utf8");
     const safetyYaml = await readFile(path.join(repoRoot, ".ai", "safety.yaml"), "utf8");
     assert.match(testsYaml, /npm run test/);
     assert.match(testsYaml, /npm run typecheck/);
+    assert.match(modelsYaml, /default_provider: codex/);
+    assert.match(conventions, /src\/modules\/<name>\/module\.yaml/);
+    assert.match(conventions, /public_api:/);
+    assert.match(conventions, /test_commands:/);
     assert.match(safetyYaml, /OPENAI_API_KEY/);
     assert.match(safetyYaml, /ANTHROPIC_API_KEY/);
     assert.match(safetyYaml, /GEMINI_API_KEY/);

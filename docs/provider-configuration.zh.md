@@ -7,17 +7,19 @@ Token Streaming 通过统一的 `ModelProvider` 中间层接入 API 模型和本
 | OpenAI | Responses / Chat Completions API | `OPENAI_API_KEY` | `gpt-5.5` |
 | Anthropic | Messages API | `ANTHROPIC_API_KEY` | `claude-sonnet-5` |
 | Gemini | Interactions API | `GEMINI_API_KEY` | `gemini-3.6-flash` |
-| Codex | 本机 `codex exec` | Codex 已有登录态 | Codex 配置值 |
+| Codex | 本机 `codex exec` | Codex 已有登录态 | `gpt-5.5` |
 | Stub | 本地确定性实现 | 无 | `stub` |
 
 ## 默认路由
 
-`--provider auto` 是默认值，但只在 API Provider 之间路由：
+不传 `--provider` 时默认选择 `codex`，CLI 会自动检测本机 Codex 并使用已有登录态。
+
+`--provider auto` 是显式的 API 自动路由模式：
 
 1. 模型名以 `claude-`、`gemini-`/`gemma-`、`gpt-` 等已知前缀开头时，优先匹配对应 API Provider。
 2. 没有模型族提示时，按 OpenAI、Anthropic、Gemini 的固定顺序选择已配置 Key 的 Provider。
 3. 没有任何 API Key 时回退 Stub，保证离线开发和测试不产生费用。
-4. 即使电脑安装了 Codex，`auto` 也不会静默启动它；必须显式传入 `--provider codex`。
+4. 即使电脑安装了 Codex，显式 `auto` 也不会启动它，便于 CI 或用户强制要求 API-only 行为。
 
 ## API Provider
 
@@ -66,14 +68,14 @@ Anthropic 与 Gemini Adapter 使用各自原生协议。原生网关应分别兼
 只检查配置和可执行文件，不调用模型：
 
 ```powershell
-pnpm cli -- --provider codex config inspect --json
-pnpm cli -- --provider codex doctor models --json
+pnpm cli -- config inspect --json
+pnpm cli -- doctor models --json
 ```
 
 发起最小真实请求：
 
 ```powershell
-pnpm cli -- --provider codex doctor models --probe --json
+pnpm cli -- doctor models --probe --json
 pnpm smoke:codex
 ```
 
@@ -88,10 +90,11 @@ CLI 按以下顺序检测 Codex：
 ```powershell
 $env:CODEX_EXEC_PATH="C:\path\to\codex.exe"
 $env:CODEX_EXEC_MODEL="gpt-model-supported-by-your-codex"
+$env:CODEX_EXEC_SERVICE_TIER="fast"
 $env:CODEX_EXEC_TIMEOUT_MS="300000"
 ```
 
-未设置 `CODEX_EXEC_MODEL` 时沿用 Codex 自身配置的模型。`doctor models` 会执行只读的 `codex --version` 并校验 Codex CLI 标识；只有 `--probe` 或真实任务才会产生模型用量。
+未设置 `CODEX_EXEC_MODEL` 时使用兼容默认值 `gpt-5.5`，避免本机 Codex 配置指向当前 CLI 不支持的过新模型；仍可用环境变量或 CLI `--model` 覆盖。`CODEX_EXEC_SERVICE_TIER` 支持 `fast` 或 `flex`，默认 `fast`，并会覆盖旧版配置中的无效 `default` 值。`doctor models` 会执行只读的 `codex --version` 并校验 Codex CLI 标识；只有 `--probe` 或真实任务才会产生模型用量。
 
 每次调用都使用 stdin、临时输出文件以及 `codex exec --ephemeral --sandbox read-only --json`。同时限制提示和输出大小、设置超时、清理临时目录，并通过 `CODEX_EXEC_PROVIDER_DEPTH` 阻止递归调用。Codex 只负责生成结果，实际写入仍经过 Permission System、Patch Engine、Checkpoint 和 Test Feedback。
 

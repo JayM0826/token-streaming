@@ -9,5 +9,5 @@ The project is intentionally headless at the core layer. The CLI is the first ho
 - Implement one real orchestration strategy: `default`.
 - Keep product modes represented as `economy`, `max`, and `auto`.
 - Treat `.ai/`, `module.yaml`, and `flow.yaml` as first-class repository context.
-- Use native OpenAI, Anthropic, and Gemini APIs by default, with explicit local Codex exec and a stub fallback for offline development.
+- Use local Codex exec by default, with explicit API routing for OpenAI, Anthropic, and Gemini and a stub fallback for offline development.
 - Persist event logs, checkpoints, and markdown run reports.
