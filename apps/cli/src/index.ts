@@ -32,6 +32,7 @@ import {
   resolveModelSelection,
   resolveProviderConfig,
   type CommercialProviderName,
+  type LocalProviderName,
   type ModelDoctorResult,
   type OpenAIApiProtocol,
   type ProviderName
@@ -146,17 +147,18 @@ interface HistoryPruneCandidates {
 }
 
 interface LiveSmokeReadiness {
-  provider: CommercialProviderName;
+  provider: CommercialProviderName | LocalProviderName;
   command: string;
-  status: "missing-api-key" | "ready" | "verified" | "failed";
+  status: "missing-api-key" | "missing-executable" | "ready" | "verified" | "failed";
   verified: boolean;
   requiredEnv: string[];
   optionalEnv: string[];
-  baseUrl: string;
+  baseUrl?: string;
   apiProtocol?: OpenAIApiProtocol;
   model?: string;
   timeoutMs: number;
-  endpoint: string;
+  endpoint?: string;
+  executablePath?: string;
   message: string;
   lastProbeStatus?: ModelDoctorResult["checks"][number]["status"];
 }
@@ -347,7 +349,8 @@ async function main(): Promise<void> {
   const modelProvider = createModelProvider({
     provider: modelSelection.provider,
     model: modelSelection.model,
-    apiProtocol: args.apiProtocol
+    apiProtocol: args.apiProtocol,
+    cwd: args.cwd
   });
 
   const runtime = new TokenStreamingRuntime({
@@ -847,10 +850,10 @@ function parseStrategy(value: string): StrategyId {
 }
 
 function parseProvider(value: string): ProviderName {
-  if (value === "stub" || value === "openai" || value === "anthropic" || value === "gemini" || value === "auto") {
+  if (value === "stub" || value === "openai" || value === "anthropic" || value === "gemini" || value === "codex" || value === "auto") {
     return value;
   }
-  throw new Error(`Invalid provider "${value}". Use auto, openai, anthropic, gemini, or stub.`);
+  throw new Error(`Invalid provider "${value}". Use auto, openai, anthropic, gemini, codex, or stub.`);
 }
 
 function parseApiProtocol(value: string): OpenAIApiProtocol {
@@ -910,7 +913,7 @@ Options:
   -C, --cwd <path>       Repository root
   --mode <mode>          Product mode: economy, max, auto
   --strategy <id>        Orchestration strategy id, default: default
-  --provider <provider>  Provider: auto, openai, anthropic, gemini, stub
+  --provider <provider>  Provider: auto, openai, anthropic, gemini, codex, stub
   --api-protocol <type>  OpenAI endpoint: responses, chat-completions
   --model <model>        Model name for the selected provider
   --patch-file <path>    Load a structured patch proposal from a JSON file
@@ -1626,7 +1629,8 @@ async function printConfigInspection(args: ParsedArgs): Promise<void> {
   const providerConfig = resolveProviderConfig({
     provider: modelSelection.provider,
     model: modelSelection.model,
-    apiProtocol: args.apiProtocol
+    apiProtocol: args.apiProtocol,
+    cwd: args.cwd
   });
   const safety = summarizeSafetyPolicy(manifest.safety);
   const config = {
@@ -1661,7 +1665,7 @@ async function printConfigInspection(args: ParsedArgs): Promise<void> {
     console.log(`OpenAI API protocol: ${config.apiProtocol}`);
   }
   console.log(`Effective provider: ${config.effectiveProvider}`);
-  console.log(`Provider endpoint: ${providerConfig.endpoint ?? "local stub"}`);
+  console.log(`Provider endpoint: ${providerConfig.endpoint ?? providerConfig.executablePath ?? "local stub"}`);
   console.log(`Model selection: provider=${modelSelection.provider}, model=${modelSelection.model ?? "provider default"}, source=${modelSelection.source}`);
   console.log(`Manifest source: ${manifest.generated ? ".ai/generated or inferred" : ".ai"}`);
   console.log(`Modules: ${manifest.modules.length}`);
@@ -2384,7 +2388,8 @@ function providerHint(args: Pick<ParsedArgs, "provider">, manifest: Awaited<Retu
     manifestProvider === "stub" ||
     manifestProvider === "openai" ||
     manifestProvider === "anthropic" ||
-    manifestProvider === "gemini"
+    manifestProvider === "gemini" ||
+    manifestProvider === "codex"
   ) {
     return manifestProvider;
   }
@@ -2394,6 +2399,7 @@ function providerHint(args: Pick<ParsedArgs, "provider">, manifest: Awaited<Retu
 function publicProviderConnection(config: ReturnType<typeof resolveProviderConfig>): Record<string, unknown> {
   return {
     provider: config.provider,
+    transport: config.provider === "stub" ? "stub" : config.provider === "codex" ? "local-exec" : "api",
     hasApiKey: Boolean(config.apiKey),
     ...(config.apiKeyEnv ? { apiKeyEnv: config.apiKeyEnv } : {}),
     ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
@@ -2401,7 +2407,11 @@ function publicProviderConnection(config: ReturnType<typeof resolveProviderConfi
     ...(config.apiProtocol ? { apiProtocol: config.apiProtocol } : {}),
     ...(config.model ? { model: config.model } : {}),
     timeoutMs: config.timeoutMs,
-    optionalEnv: config.optionalEnv
+    optionalEnv: config.optionalEnv,
+    ...(config.executablePath ? { executablePath: config.executablePath } : {}),
+    ...(config.executableFound !== undefined ? { executableFound: config.executableFound } : {}),
+    ...(config.executableSource ? { executableSource: config.executableSource } : {}),
+    ...(config.cwd ? { cwd: config.cwd } : {})
   };
 }
 
@@ -2670,7 +2680,8 @@ async function printModelDoctor(repoRoot: string, args: ParsedArgs, manifest: Aw
     requestedModel: args.model,
     apiProtocol: args.apiProtocol,
     manifest,
-    probe: args.probe
+    probe: args.probe,
+    cwd: args.cwd
   });
   if (args.json) {
     printJson({
@@ -2712,7 +2723,8 @@ async function printRepoDoctor(args: ParsedArgs, manifest: Awaited<ReturnType<ty
       requestedModel: args.model,
       apiProtocol: args.apiProtocol,
       manifest,
-      probe: args.probe
+      probe: args.probe,
+      cwd: args.cwd
     }),
     getGitStatus(args.cwd),
     new SessionHistoryStore(args.cwd).list(),
@@ -2848,19 +2860,36 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
   const config = resolveProviderConfig({
     provider,
     model: modelDoctor.effectiveProvider === provider ? modelDoctor.selection.model : undefined,
-    apiProtocol: args.apiProtocol
+    apiProtocol: args.apiProtocol,
+    cwd: args.cwd
   });
   const providerLabel = capitalize(provider);
   const verified = Boolean(args.probe && modelDoctor.effectiveProvider === provider && probe?.status === "ok");
   const failed = Boolean(args.probe && modelDoctor.effectiveProvider === provider && probe?.status === "error");
-  const status = verified ? "verified" : failed ? "failed" : config.apiKey ? "ready" : "missing-api-key";
+  const codexCheck = modelDoctor.checks.find((check) => check.name === "codex-exec");
+  const ready = provider === "codex" ? codexCheck?.status === "ok" : Boolean(config.apiKey);
+  const status = verified
+    ? "verified"
+    : failed
+      ? "failed"
+      : ready
+        ? "ready"
+        : provider === "codex"
+          ? "missing-executable"
+          : "missing-api-key";
   const message = verified
     ? `${providerLabel} live probe completed successfully.`
     : failed
       ? probe?.message ?? `${providerLabel} live probe failed.`
-      : config.apiKey
-        ? `${config.apiKeyEnv} is available. Run the smoke command to verify ${config.endpoint}.`
-        : `${config.apiKeyEnv} is not set, so the ${providerLabel} live smoke test cannot run.`;
+      : provider === "codex"
+        ? config.executableFound
+          ? codexCheck?.status === "ok"
+            ? `Codex was found at ${config.executablePath}. Run the smoke command to verify a model request.`
+            : codexCheck?.message ?? "The configured Codex executable is not runnable."
+          : "Codex CLI was not found. Install it or set CODEX_EXEC_PATH before running the smoke test."
+        : config.apiKey
+          ? `${config.apiKeyEnv} is available. Run the smoke command to verify ${config.endpoint}.`
+          : `${config.apiKeyEnv} is not set, so the ${providerLabel} live smoke test cannot run.`;
 
   return {
     provider,
@@ -2869,21 +2898,22 @@ function buildLiveSmokeReadiness(args: ParsedArgs, modelDoctor: ModelDoctorResul
     verified,
     requiredEnv: config.apiKeyEnv ? [config.apiKeyEnv] : [],
     optionalEnv: config.optionalEnv,
-    baseUrl: config.baseUrl ?? "",
+    ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
     ...(config.apiProtocol ? { apiProtocol: config.apiProtocol } : {}),
     model: config.model,
     timeoutMs: config.timeoutMs,
-    endpoint: config.endpoint ?? "",
+    ...(config.endpoint ? { endpoint: config.endpoint } : {}),
+    ...(config.executablePath ? { executablePath: config.executablePath } : {}),
     message,
     lastProbeStatus: probe?.status
   };
 }
 
-function liveSmokeProvider(args: ParsedArgs, modelDoctor: ModelDoctorResult): CommercialProviderName {
+function liveSmokeProvider(args: ParsedArgs, modelDoctor: ModelDoctorResult): CommercialProviderName | LocalProviderName {
   if (modelDoctor.effectiveProvider !== "stub") {
     return modelDoctor.effectiveProvider;
   }
-  if (args.provider === "openai" || args.provider === "anthropic" || args.provider === "gemini") {
+  if (args.provider === "openai" || args.provider === "anthropic" || args.provider === "gemini" || args.provider === "codex") {
     return args.provider;
   }
   return "openai";

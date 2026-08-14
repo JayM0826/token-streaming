@@ -127,6 +127,45 @@ test("diagnoseModelProvider reports Anthropic and Gemini native endpoints", asyn
   assert.equal(gemini.connection.apiKeyEnv, "GEMINI_API_KEY");
 });
 
+test("diagnoseModelProvider verifies Codex exec without requiring an API key", async () => {
+  const result = await diagnoseModelProvider({
+    mode: "auto",
+    requestedProvider: "codex",
+    requestedModel: "gpt-local",
+    cwd: process.cwd(),
+    codexExecPath: process.execPath,
+    codexExecInspector: async () => ({ runnable: true, version: "codex-cli test", message: "Codex executable is runnable." }),
+    codexExecRunner: async () => ({ exitCode: 0, stdout: "", stderr: "", finalMessage: "ok" }),
+    probe: true,
+    environment: {}
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.effectiveProvider, "codex");
+  assert.equal(result.connection.transport, "local-exec");
+  assert.equal(result.connection.hasApiKey, false);
+  assert.equal(result.connection.executableFound, true);
+  assert.equal(result.connection.executableVersion, "codex-cli test");
+  assert.equal(result.checks.find((check) => check.name === "codex-sandbox")?.status, "ok");
+  assert.equal(result.checks.find((check) => check.name === "probe")?.status, "ok");
+});
+
+test("diagnoseModelProvider reports a missing Codex executable and skips its probe", async () => {
+  const result = await diagnoseModelProvider({
+    mode: "auto",
+    requestedProvider: "codex",
+    codexExecPath: "missing-codex-executable",
+    probe: true,
+    environment: {}
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.connection.transport, "local-exec");
+  assert.equal(result.connection.executableFound, false);
+  assert.equal(result.checks.find((check) => check.name === "codex-exec")?.status, "error");
+  assert.equal(result.checks.find((check) => check.name === "probe")?.status, "skipped");
+});
+
 test("diagnoseModelProvider probes native Anthropic and Gemini providers", async () => {
   const originalFetch = globalThis.fetch;
   const endpoints = [];

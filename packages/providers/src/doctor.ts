@@ -1,4 +1,5 @@
 import type { ProductMode, RepoManifest } from "@token-streaming/protocol";
+import { inspectCodexExec, type CodexExecInspection, type CodexExecRunner } from "./codex-exec-provider.js";
 import {
   availableProviderNames,
   createModelProvider,
@@ -26,10 +27,15 @@ export interface ModelDoctorOptions {
   timeoutMs?: number;
   probe?: boolean;
   environment?: ProviderEnvironment;
+  cwd?: string;
+  codexExecPath?: string;
+  codexExecRunner?: CodexExecRunner;
+  codexExecInspector?: typeof inspectCodexExec;
 }
 
 export interface ModelDoctorConnection {
   provider: ConcreteProviderName;
+  transport: "api" | "local-exec" | "stub";
   hasApiKey: boolean;
   apiKeyEnv?: string;
   baseUrl?: string;
@@ -38,6 +44,11 @@ export interface ModelDoctorConnection {
   model?: string;
   timeoutMs: number;
   optionalEnv: string[];
+  executablePath?: string;
+  executableFound?: boolean;
+  executableSource?: "configured" | "desktop" | "path" | "missing";
+  executableVersion?: string;
+  cwd?: string;
 }
 
 export interface ModelDoctorResult {
@@ -77,6 +88,8 @@ export async function diagnoseModelProvider(options: ModelDoctorOptions): Promis
     baseUrl: options.baseUrl,
     apiProtocol: options.apiProtocol,
     timeoutMs: options.timeoutMs,
+    cwd: options.cwd,
+    codexExecPath: options.codexExecPath,
     environment
   });
   const checks: ModelDoctorCheck[] = [
@@ -87,18 +100,22 @@ export async function diagnoseModelProvider(options: ModelDoctorOptions): Promis
     }
   ];
 
-  appendConnectionChecks(checks, selection, config);
+  const codexInspection = await appendConnectionChecks(checks, selection, config, options);
   if (options.probe) {
-    checks.push(await runProbe(config));
+    if (config.provider === "codex" && !codexInspection?.runnable) {
+      checks.push({ name: "probe", status: "skipped", message: "Codex model probe skipped because the executable is not runnable." });
+    } else {
+      checks.push(await runProbe(config, options));
+    }
   } else {
     checks.push({
       name: "probe",
       status: "skipped",
-      message: "Network probe skipped. Pass --probe to send a minimal provider request."
+      message: "Model probe skipped. Pass --probe to send a minimal provider request."
     });
   }
 
-  const connection = publicConnection(config);
+  const connection = publicConnection(config, codexInspection);
   return {
     ok: checks.every((check) => check.status !== "error"),
     selection: {
@@ -112,7 +129,12 @@ export async function diagnoseModelProvider(options: ModelDoctorOptions): Promis
   };
 }
 
-function appendConnectionChecks(checks: ModelDoctorCheck[], selection: ModelSelection, config: ResolvedProviderConfig): void {
+async function appendConnectionChecks(
+  checks: ModelDoctorCheck[],
+  selection: ModelSelection,
+  config: ResolvedProviderConfig,
+  options: ModelDoctorOptions
+): Promise<CodexExecInspection | undefined> {
   if (config.provider === "stub") {
     if (selection.provider === "auto") {
       checks.push({
@@ -121,7 +143,32 @@ function appendConnectionChecks(checks: ModelDoctorCheck[], selection: ModelSele
         message: "No commercial provider API key is set; provider=auto will use the local stub provider."
       });
     }
-    return;
+    return undefined;
+  }
+
+  if (config.provider === "codex") {
+    if (!config.executablePath || !config.executableFound) {
+      checks.push({
+        name: "codex-exec",
+        status: "error",
+        message: "No Codex executable was found. Install Codex CLI or set CODEX_EXEC_PATH to an executable file."
+      });
+      return { runnable: false, message: "Codex executable was not found." };
+    }
+    const inspector = options.codexExecInspector ?? inspectCodexExec;
+    const inspection = await inspector(config.executablePath, { timeoutMs: 5_000, environment: options.environment });
+    checks.push({ name: "codex-exec", status: inspection.runnable ? "ok" : "error", message: inspection.message });
+    checks.push({
+      name: "codex-sandbox",
+      status: "ok",
+      message: "Codex requests use ephemeral sessions, stdin prompts, and the read-only sandbox."
+    });
+    checks.push({
+      name: "codex-timeout",
+      status: "ok",
+      message: `Codex exec requests time out after ${config.timeoutMs}ms.`
+    });
+    return inspection;
   }
 
   if (!config.apiKey) {
@@ -130,7 +177,7 @@ function appendConnectionChecks(checks: ModelDoctorCheck[], selection: ModelSele
       status: "error",
       message: `${config.apiKeyEnv} is required when provider=${config.provider}.`
     });
-    return;
+    return undefined;
   }
 
   checks.push({
@@ -155,9 +202,10 @@ function appendConnectionChecks(checks: ModelDoctorCheck[], selection: ModelSele
     status: "ok",
     message: `${capitalize(config.provider)} requests time out after ${config.timeoutMs}ms.`
   });
+  return undefined;
 }
 
-async function runProbe(config: ResolvedProviderConfig): Promise<ModelDoctorCheck> {
+async function runProbe(config: ResolvedProviderConfig, options: ModelDoctorOptions): Promise<ModelDoctorCheck> {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       const provider = createModelProvider({
@@ -167,6 +215,9 @@ async function runProbe(config: ResolvedProviderConfig): Promise<ModelDoctorChec
         baseUrl: config.baseUrl,
         apiProtocol: config.apiProtocol,
         timeoutMs: config.timeoutMs,
+        cwd: config.cwd,
+        codexExecPath: config.executablePath,
+        codexExecRunner: options.codexExecRunner,
         environment: {}
       });
       const response = await provider.generate({
@@ -194,9 +245,10 @@ async function runProbe(config: ResolvedProviderConfig): Promise<ModelDoctorChec
   throw new Error("Unreachable probe state.");
 }
 
-function publicConnection(config: ResolvedProviderConfig): ModelDoctorConnection {
+function publicConnection(config: ResolvedProviderConfig, codexInspection?: CodexExecInspection): ModelDoctorConnection {
   return {
     provider: config.provider,
+    transport: config.provider === "stub" ? "stub" : config.provider === "codex" ? "local-exec" : "api",
     hasApiKey: Boolean(config.apiKey),
     ...(config.apiKeyEnv ? { apiKeyEnv: config.apiKeyEnv } : {}),
     ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
@@ -204,7 +256,12 @@ function publicConnection(config: ResolvedProviderConfig): ModelDoctorConnection
     ...(config.apiProtocol ? { apiProtocol: config.apiProtocol } : {}),
     ...(config.model ? { model: config.model } : {}),
     timeoutMs: config.timeoutMs,
-    optionalEnv: config.optionalEnv
+    optionalEnv: config.optionalEnv,
+    ...(config.executablePath ? { executablePath: config.executablePath } : {}),
+    ...(config.executableFound !== undefined ? { executableFound: config.executableFound } : {}),
+    ...(config.executableSource ? { executableSource: config.executableSource } : {}),
+    ...(codexInspection?.version ? { executableVersion: codexInspection.version } : {}),
+    ...(config.cwd ? { cwd: config.cwd } : {})
   };
 }
 
@@ -217,7 +274,8 @@ function providerHint(options: ModelDoctorOptions): ProviderName {
     manifestProvider === "stub" ||
     manifestProvider === "openai" ||
     manifestProvider === "anthropic" ||
-    manifestProvider === "gemini"
+    manifestProvider === "gemini" ||
+    manifestProvider === "codex"
   ) {
     return manifestProvider;
   }

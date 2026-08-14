@@ -5,17 +5,18 @@ import path from "node:path";
 const PROVIDERS = {
   openai: "OPENAI_API_KEY",
   anthropic: "ANTHROPIC_API_KEY",
-  gemini: "GEMINI_API_KEY"
+  gemini: "GEMINI_API_KEY",
+  codex: undefined
 };
 
 export function runProviderSmoke(provider) {
   const apiKeyEnv = PROVIDERS[provider];
-  if (!apiKeyEnv) {
-    console.error(`Unsupported smoke provider "${provider}". Use openai, anthropic, or gemini.`);
+  if (!(provider in PROVIDERS)) {
+    console.error(`Unsupported smoke provider "${provider}". Use openai, anthropic, gemini, or codex.`);
     process.exitCode = 1;
     return;
   }
-  if (!process.env[apiKeyEnv]?.trim()) {
+  if (apiKeyEnv && !process.env[apiKeyEnv]?.trim()) {
     console.error(`${apiKeyEnv} is required for the ${providerLabel(provider)} smoke test.`);
     process.exitCode = 1;
     return;

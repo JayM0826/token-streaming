@@ -14,6 +14,9 @@ const PROVIDERS = {
   gemini: {
     apiKeyEnv: "GEMINI_API_KEY",
     environment: ["GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_TIMEOUT_MS"]
+  },
+  codex: {
+    environment: ["CODEX_EXEC_PATH", "CODEX_EXEC_MODEL", "CODEX_EXEC_TIMEOUT_MS", "CODEX_EXEC_PROVIDER_DEPTH"]
   }
 };
 
@@ -71,7 +74,7 @@ for (const [name, command] of steps) {
   });
 }
 
-if (explicitProvider && !process.env[PROVIDERS[explicitProvider].apiKeyEnv]?.trim()) {
+if (explicitProvider && explicitProvider !== "codex" && !process.env[PROVIDERS[explicitProvider].apiKeyEnv]?.trim()) {
   const readiness = run(
     [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--provider", explicitProvider, "--json"],
     process.env
@@ -79,7 +82,7 @@ if (explicitProvider && !process.env[PROVIDERS[explicitProvider].apiKeyEnv]?.tri
   liveSmoke = parseJson(readiness.stdout)?.liveSmoke ?? liveSmoke;
 }
 
-if (provider && process.env[PROVIDERS[provider].apiKeyEnv]?.trim()) {
+if (provider && (provider === "codex" || process.env[PROVIDERS[provider].apiKeyEnv]?.trim())) {
   const command = [process.execPath, "apps/cli/dist/index.js", "doctor", "repo", "--provider", provider, "--probe", "--json"];
   const result = run(command, process.env);
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
@@ -236,14 +239,14 @@ function requestedProvider(args) {
     return undefined;
   }
   const value = args[index + 1];
-  if (value === "openai" || value === "anthropic" || value === "gemini") {
+  if (value === "openai" || value === "anthropic" || value === "gemini" || value === "codex") {
     return value;
   }
-  throw new Error(`Invalid acceptance provider "${value ?? ""}". Use openai, anthropic, or gemini.`);
+  throw new Error(`Invalid acceptance provider "${value ?? ""}". Use openai, anthropic, gemini, or codex.`);
 }
 
 function configuredProvider(environment) {
-  return Object.keys(PROVIDERS).find((name) => environment[PROVIDERS[name].apiKeyEnv]?.trim());
+  return Object.keys(PROVIDERS).find((name) => name !== "codex" && environment[PROVIDERS[name].apiKeyEnv]?.trim());
 }
 
 function capitalize(value) {

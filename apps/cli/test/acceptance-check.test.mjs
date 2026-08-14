@@ -192,7 +192,11 @@ function cleanProviderEnvironment(overrides = {}) {
     "GEMINI_API_KEY",
     "GEMINI_BASE_URL",
     "GEMINI_MODEL",
-    "GEMINI_TIMEOUT_MS"
+    "GEMINI_TIMEOUT_MS",
+    "CODEX_EXEC_PATH",
+    "CODEX_EXEC_MODEL",
+    "CODEX_EXEC_TIMEOUT_MS",
+    "CODEX_EXEC_PROVIDER_DEPTH"
   ]) {
     environment[name] = "";
   }

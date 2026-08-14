@@ -109,6 +109,7 @@ pnpm cli -- --strategy default --provider stub "inspect the repo"
 pnpm cli -- --provider openai --model gpt-5.5 "plan this change"
 pnpm cli -- --provider anthropic --model claude-sonnet-5 "plan this change"
 pnpm cli -- --provider gemini --model gemini-3.6-flash "plan this change"
+pnpm cli -- --provider codex "plan this change"
 pnpm cli -- --parallel-agents --dry-run "fix failing test"
 pnpm cli -- --patch-file proposal.json --apply "apply a proposed change"
 pnpm cli -- --patch-file proposal.json --apply --repair "apply and try one repair if verification fails"
@@ -153,23 +154,27 @@ pnpm cli -- doctor models --probe
 pnpm smoke:openai
 pnpm smoke:anthropic
 pnpm smoke:gemini
+pnpm smoke:codex
 pnpm acceptance:check -- --json
 ```
 
 Provider behavior:
 
 - `--provider auto` is the default.
-- `auto` uses a provider whose key is available. Model prefixes (`gpt-*`, `claude-*`, `gemini-*`) take precedence; otherwise the deterministic key order is OpenAI, Anthropic, then Gemini.
+- `auto` routes only across API providers whose keys are available. Model prefixes (`gpt-*`, `claude-*`, `gemini-*`) take precedence; otherwise the deterministic key order is OpenAI, Anthropic, then Gemini.
+- `auto` never silently starts a local Codex process. Use `--provider codex` explicitly when that transport is wanted.
 - `auto` falls back to the stub provider when no API key is present.
 - `--provider openai` requires `OPENAI_API_KEY`.
 - `--provider anthropic` requires `ANTHROPIC_API_KEY` and uses the native Messages API at `<base-url>/messages`.
 - `--provider gemini` requires `GEMINI_API_KEY` and uses the native Interactions API at `<base-url>/interactions`.
+- `--provider codex` detects the local Codex CLI and invokes `codex exec` through the existing Codex login instead of an API key.
 - `OPENAI_BASE_URL` optionally points the OpenAI provider at an OpenAI-compatible relay or gateway.
 - `OPENAI_API_PROTOCOL` selects `responses` (default) or `chat-completions`; the equivalent CLI option is `--api-protocol`.
 - `OPENAI_MODEL` overrides manifest model routing for relay-specific model names; an explicit `--model` still takes precedence.
 - `OPENAI_TIMEOUT_MS` sets the OpenAI-compatible request timeout in milliseconds (default `30000`, maximum `600000`).
 - Anthropic uses `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_TIMEOUT_MS`; defaults are `https://api.anthropic.com/v1` and `claude-sonnet-5`.
 - Gemini uses `GEMINI_BASE_URL`, `GEMINI_MODEL`, and `GEMINI_TIMEOUT_MS`; defaults are `https://generativelanguage.googleapis.com/v1` and `gemini-3.6-flash`.
+- Codex uses `CODEX_EXEC_PATH`, `CODEX_EXEC_MODEL`, and `CODEX_EXEC_TIMEOUT_MS`; the executable and model are normally auto-detected/configured by Codex, and the timeout defaults to `300000`.
 - A relay must expose either `<base-url>/responses` or `<base-url>/chat/completions`, matching the selected protocol.
 - `--model` overrides repository model policy.
 - `doctor repo` aggregates repository, manifest, model, git, storage, and tool readiness without running tests or calling a model by default.
@@ -178,7 +183,7 @@ Provider behavior:
 - `doctor models` checks model policy and provider readiness without sending network requests by default.
 - `doctor models --json` exposes model readiness checks, skipped/warning/error counts, selected model, and effective provider.
 - `doctor models --probe` sends a minimal provider request with low reasoning effort, a small output cap, timeout handling, safe transport diagnostics, and one retry for transient connection failures.
-- `pnpm smoke:openai`, `pnpm smoke:anthropic`, and `pnpm smoke:gemini` run the matching real provider probe path through the built CLI.
+- `pnpm smoke:openai`, `pnpm smoke:anthropic`, `pnpm smoke:gemini`, and `pnpm smoke:codex` run the matching real provider probe path through the built CLI.
 - `config inspect --json` and both doctor commands expose endpoints and key presence, but never expose API key values.
 
 Native Anthropic and Gemini setup on Windows PowerShell:
@@ -196,6 +201,16 @@ pnpm smoke:gemini
 ```
 
 Set these variables in the same terminal that launches the CLI. Do not write API keys into `.ai/`, source files, command history, or committed `.env` files.
+
+Local Codex setup on Windows PowerShell:
+
+```powershell
+pnpm cli -- --provider codex doctor models --json
+pnpm cli -- --provider codex doctor models --probe --json
+pnpm smoke:codex
+```
+
+Detection checks `CODEX_EXEC_PATH` first, then the Codex desktop installation under `%LOCALAPPDATA%`, then `PATH`. `doctor models` only checks the executable and `--version`; `--probe` and `smoke:codex` make a real model request and may consume Codex account usage. Requests use stdin with `codex exec --ephemeral --sandbox read-only --json`; generated changes still pass through Token Streaming's permission, patch, checkpoint, and test boundaries. See the [official Codex CLI command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli).
 
 - To test a third-party OpenAI-compatible relay, set both environment variables before probing:
 
@@ -220,7 +235,7 @@ export OPENAI_TIMEOUT_MS="120000"
 pnpm cli -- --provider openai doctor models --probe --json
 pnpm acceptance:check -- --json
 ```
-- `pnpm acceptance:check -- --provider <openai|anthropic|gemini> --json` is the final acceptance gate: offline quality checks plus the selected provider's live-smoke verification. Without `--provider`, the first configured provider is selected deterministically.
+- `pnpm acceptance:check -- --provider <openai|anthropic|gemini|codex> --json` is the final acceptance gate: offline quality checks plus the selected provider's live-smoke verification. Without `--provider`, the first configured API provider is selected deterministically; Codex remains explicit-only.
 
 Mode behavior:
 
@@ -254,7 +269,7 @@ Manifest behavior:
 - Generated `repo-map.json` includes heuristic module candidates, workflow candidates, test mappings, evidence, and confidence levels so inherited repos can be promoted into the official standard incrementally.
 - `manifest inspect --json` exposes manifest source, coverage, modules, workflows, playbooks, command groups, and validation results.
 - `manifest validate` checks the `.ai/` surface, ownership metadata, module manifests, playbooks, and verification catalog for agent-readable gaps.
-- `manifest validate` also checks `.ai/models.yaml` provider names (`auto`, `openai`, `anthropic`, `gemini`, `stub`), mode model fields, and scored `model_candidates` quality/cost/latency ranges.
+- `manifest validate` also checks `.ai/models.yaml` provider names (`auto`, `openai`, `anthropic`, `gemini`, `codex`, `stub`), mode model fields, and scored `model_candidates` quality/cost/latency ranges.
 - `manifest validate --json` emits structured issue counts and issue details.
 - `commands list` prints the repository-declared standard commands from `.ai/commands.yaml` without executing them.
 - `commands list --json` exposes the command catalog as structured command groups.

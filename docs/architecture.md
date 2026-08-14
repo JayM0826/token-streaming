@@ -222,7 +222,9 @@ Run reports include a `Changes` section for patch and rollback context.
 
 Model selection is policy-driven but still user-overridable.
 
-Provider-specific wire formats stop at `packages/providers`. The runtime consumes the shared `ModelProvider` request/response contract, while adapters translate it to OpenAI Responses or Chat Completions, Anthropic Messages, Gemini Interactions, or the deterministic local stub. Authentication headers, base URLs, request shapes, response text, token usage, timeout handling, and safe diagnostics remain adapter concerns.
+Provider-specific wire formats stop at `packages/providers`. The runtime consumes the shared `ModelProvider` request/response contract, while adapters translate it to OpenAI Responses or Chat Completions, Anthropic Messages, Gemini Interactions, local `codex exec`, or the deterministic stub. Authentication headers, base URLs, request shapes, process invocation, response text, token usage, timeout handling, and safe diagnostics remain adapter concerns.
+
+API transport is the default routing boundary: `auto` considers configured OpenAI, Anthropic, and Gemini credentials, then falls back to Stub. It never silently starts Codex. The local Codex adapter is explicit-only, auto-detects the desktop/PATH executable, validates `codex --version`, and invokes `codex exec` with ephemeral state, stdin, JSON events, a read-only sandbox, bounded output, timeout cleanup, and recursion protection. This keeps local account transport swappable without granting a nested agent direct write authority.
 
 - CLI `--model` has the highest priority.
 - `.ai/models.yaml` can define `economy_model`, `auto_model`, `max_model`, `default_model`, and scored `model_candidates`.
@@ -234,7 +236,7 @@ Provider-specific wire formats stop at `packages/providers`. The runtime consume
 - `models select --json` exposes routing decisions, inferred task kind, candidate feedback, and telemetry recommendations as structured data for cost/effectiveness UI and automation.
 - `doctor models` validates selection and provider readiness without network calls unless `--probe` is passed. Probe requests use the selected provider/model, low reasoning effort, a small output cap, request timeout handling, safe nested transport diagnostics, one retry for transient connection failures, and structured error reporting for JSON and non-JSON upstream failures. HTTP failures accept OpenAI, Anthropic, Gemini, and common relay error envelopes while retaining bounded status/type/code/request-id metadata and redacting the configured API key.
 - `doctor models --json` exposes readiness checks, skipped/warning/error counts, selected model, and effective provider for CI, automation, and future desktop status panels.
-- `pnpm smoke:openai`, `pnpm smoke:anthropic`, and `pnpm smoke:gemini` are explicit live smoke entry points. Each requires its native key and runs `doctor models --probe --json` with the concrete provider through the built CLI.
+- `pnpm smoke:openai`, `pnpm smoke:anthropic`, `pnpm smoke:gemini`, and `pnpm smoke:codex` are explicit live smoke entry points. API smoke commands require native keys; Codex uses its existing local login. Each runs `doctor models --probe --json` through the built CLI.
 
 ## Repository Doctor
 
@@ -280,7 +282,7 @@ The generated fallback `repo-map.json` is intentionally heuristic: it records tr
 
 `manifest validate --json` emits the same result as structured issue counts and issue records.
 
-Model routing metadata is validated as part of the same manifest gate: `default_provider` must be `auto`, `openai`, `anthropic`, `gemini`, or `stub`; mode-specific model fields must be non-empty strings; and `model_candidates` must use bounded `quality`, `cost`, and `latency` values from 0 to 1. This keeps cost/effectiveness routing explainable and prevents malformed candidate scores from silently steering the agent.
+Model routing metadata is validated as part of the same manifest gate: `default_provider` must be `auto`, `openai`, `anthropic`, `gemini`, `codex`, or `stub`; mode-specific model fields must be non-empty strings; and `model_candidates` must use bounded `quality`, `cost`, and `latency` values from 0 to 1. This keeps cost/effectiveness routing explainable and prevents malformed candidate scores from silently steering the agent.
 
 `commands list` exposes `.ai/commands.yaml` as a read-only command catalog. It intentionally does not execute the commands; execution remains behind explicit runtime verification or user shell actions so the manifest can be inspected safely by both the CLI and future desktop hosts. `commands list --json` returns the same catalog as structured command groups.
 

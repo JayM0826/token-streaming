@@ -1,4 +1,5 @@
 export * from "./anthropic-provider.js";
+export * from "./codex-exec-provider.js";
 export * from "./factory.js";
 export * from "./doctor.js";
 export * from "./gemini-provider.js";

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AnthropicMessagesProvider,
+  CodexExecProvider,
   GeminiInteractionsProvider,
   OpenAIResponsesProvider,
   StubModelProvider,
@@ -54,6 +55,40 @@ test("factory resolves native defaults and rejects missing explicit credentials"
 
 test("availableProviderNames reports only configured commercial providers", () => {
   assert.deepEqual(availableProviderNames({ ANTHROPIC_API_KEY: "a", GEMINI_API_KEY: "" }), ["stub", "anthropic"]);
+});
+
+test("factory uses Codex only when explicitly selected and never as the API auto fallback", () => {
+  const runner = async () => ({ exitCode: 0, stdout: "", stderr: "", finalMessage: "ok" });
+  const codex = createModelProvider({
+    provider: "codex",
+    codexExecPath: process.execPath,
+    codexExecRunner: runner,
+    environment: { CODEX_EXEC_MODEL: "gpt-local", CODEX_EXEC_TIMEOUT_MS: "45000" }
+  });
+  const config = resolveProviderConfig({
+    provider: "codex",
+    codexExecPath: process.execPath,
+    environment: { CODEX_EXEC_MODEL: "gpt-local", CODEX_EXEC_TIMEOUT_MS: "45000" }
+  });
+
+  assert.equal(codex instanceof CodexExecProvider, true);
+  assert.equal(config.provider, "codex");
+  assert.equal(config.model, "gpt-local");
+  assert.equal(config.timeoutMs, 45_000);
+  assert.equal(config.executableFound, true);
+  assert.equal(config.executableSource, "configured");
+  assert.equal(
+    createModelProvider({ provider: "auto", environment: { CODEX_EXEC_PATH: process.execPath } }) instanceof StubModelProvider,
+    true
+  );
+  assert.deepEqual(availableProviderNames({ CODEX_EXEC_PATH: process.execPath }), ["stub"]);
+});
+
+test("factory rejects an explicitly selected missing Codex executable", () => {
+  assert.throws(
+    () => createModelProvider({ provider: "codex", codexExecPath: "missing-codex-executable", environment: {} }),
+    /runnable Codex executable is required/
+  );
 });
 
 test("factory treats blank optional environment values as unset", () => {

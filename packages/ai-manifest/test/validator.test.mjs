@@ -31,7 +31,8 @@ test("validateRepoManifest accepts a complete AI manifest", async () => {
           "gpt-5.5-mini;provider=openai;quality=0.72;cost=0.25;latency=0.25;tags=economy,fast",
           "gpt-5.5;provider=openai;quality=0.94;cost=0.75;latency=0.55;tags=balanced,max",
           "claude-sonnet-5;provider=anthropic;quality=0.94;cost=0.75;latency=0.55;tags=balanced,max",
-          "gemini-3.6-flash;provider=gemini;quality=0.86;cost=0.35;latency=0.25;tags=economy,fast"
+          "gemini-3.6-flash;provider=gemini;quality=0.86;cost=0.35;latency=0.25;tags=economy,fast",
+          "codex-configured;provider=codex;quality=0.9;cost=0.5;latency=0.5;tags=local"
         ]
       },
       playbooks: [

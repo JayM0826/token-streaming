@@ -6,6 +6,7 @@ sensitive_paths:
   - packages/providers/src/openai-chat-provider.ts
   - packages/providers/src/anthropic-provider.ts
   - packages/providers/src/gemini-provider.ts
+  - packages/providers/src/codex-exec-provider.ts
 protected_patterns:
   - BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY
   - OPENAI_API_KEY\s*=
@@ -20,6 +21,7 @@ requires_review:
   - changes to patch application
   - changes to rollback behavior
   - changes to provider authentication
+  - changes to local model process execution
   - applying model-generated patch proposals
 policy_behavior:
   - Sensitive paths require --allow-sensitive in the CLI host.

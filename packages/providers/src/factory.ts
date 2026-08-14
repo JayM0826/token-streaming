@@ -1,12 +1,19 @@
 import type { ModelProvider } from "@token-streaming/protocol";
 import { AnthropicMessagesProvider, DEFAULT_ANTHROPIC_MODEL } from "./anthropic-provider.js";
+import {
+  CodexExecProvider,
+  DEFAULT_CODEX_EXEC_TIMEOUT_MS,
+  detectCodexExec,
+  type CodexExecRunner
+} from "./codex-exec-provider.js";
 import { DEFAULT_GEMINI_MODEL, GeminiInteractionsProvider } from "./gemini-provider.js";
 import { OpenAIChatCompletionsProvider } from "./openai-chat-provider.js";
 import { OpenAIResponsesProvider } from "./openai-provider.js";
 import { StubModelProvider } from "./stub-provider.js";
 
 export type CommercialProviderName = "openai" | "anthropic" | "gemini";
-export type ConcreteProviderName = "stub" | CommercialProviderName;
+export type LocalProviderName = "codex";
+export type ConcreteProviderName = "stub" | CommercialProviderName | LocalProviderName;
 export type ProviderName = ConcreteProviderName | "auto";
 export type OpenAIApiProtocol = "responses" | "chat-completions";
 
@@ -19,6 +26,9 @@ export interface ProviderFactoryOptions {
   baseUrl?: string;
   apiProtocol?: OpenAIApiProtocol;
   timeoutMs?: number;
+  cwd?: string;
+  codexExecPath?: string;
+  codexExecRunner?: CodexExecRunner;
   environment?: ProviderEnvironment;
 }
 
@@ -33,6 +43,11 @@ export interface ResolvedProviderConfig {
   apiProtocol?: OpenAIApiProtocol;
   timeoutMs: number;
   optionalEnv: string[];
+  cwd?: string;
+  executablePath?: string;
+  executableFound?: boolean;
+  executableSource?: "configured" | "desktop" | "path" | "missing";
+  searchedExecutablePaths?: string[];
 }
 
 interface CommercialProviderDefinition {
@@ -83,6 +98,19 @@ export function createModelProvider(options: ProviderFactoryOptions = {}): Model
   if (config.provider === "stub") {
     return new StubModelProvider();
   }
+  if (config.provider === "codex") {
+    if (!config.executablePath || !config.executableFound) {
+      throw new Error("A runnable Codex executable is required when --provider codex is selected. Set CODEX_EXEC_PATH if auto-detection cannot find it.");
+    }
+    return new CodexExecProvider({
+      executablePath: config.executablePath,
+      model: config.model,
+      cwd: config.cwd,
+      timeoutMs: config.timeoutMs,
+      environment: options.environment,
+      runner: options.codexExecRunner
+    });
+  }
   if (!config.apiKey || !config.model || !config.baseUrl) {
     throw new Error(`${config.apiKeyEnv} is required when --provider ${config.provider} is selected.`);
   }
@@ -103,6 +131,21 @@ export function resolveProviderConfig(options: ProviderFactoryOptions = {}): Res
 
   if (provider === "stub") {
     return { requestedProvider, provider, timeoutMs: DEFAULT_PROVIDER_TIMEOUT_MS, optionalEnv: [] };
+  }
+  if (provider === "codex") {
+    const detection = detectCodexExec({ configuredPath: options.codexExecPath, environment });
+    return {
+      requestedProvider,
+      provider,
+      model: normalizedValue(options.model) ?? normalizedValue(environment.CODEX_EXEC_MODEL),
+      timeoutMs: resolveProviderTimeoutMs(options.timeoutMs ?? environment.CODEX_EXEC_TIMEOUT_MS, provider),
+      optionalEnv: ["CODEX_EXEC_PATH", "CODEX_EXEC_MODEL", "CODEX_EXEC_TIMEOUT_MS"],
+      cwd: options.cwd,
+      executablePath: detection.executablePath,
+      executableFound: detection.found,
+      executableSource: detection.source,
+      searchedExecutablePaths: detection.searchedPaths
+    };
   }
 
   const definition = DEFINITIONS[provider];
@@ -154,6 +197,9 @@ export function resolveEnvironmentModel(provider: ProviderName, environment: Pro
   if (effectiveProvider === "stub") {
     return undefined;
   }
+  if (effectiveProvider === "codex") {
+    return normalizedValue(environment.CODEX_EXEC_MODEL);
+  }
   return normalizedValue(environment[DEFINITIONS[effectiveProvider].modelEnv]);
 }
 
@@ -175,13 +221,13 @@ export function resolveOpenAITimeoutMs(value: number | string | undefined = proc
   return resolveProviderTimeoutMs(value, "openai");
 }
 
-export function resolveProviderTimeoutMs(value: number | string | undefined, provider: CommercialProviderName): number {
+export function resolveProviderTimeoutMs(value: number | string | undefined, provider: CommercialProviderName | LocalProviderName): number {
   if (value === undefined || value === "") {
-    return DEFAULT_PROVIDER_TIMEOUT_MS;
+    return provider === "codex" ? DEFAULT_CODEX_EXEC_TIMEOUT_MS : DEFAULT_PROVIDER_TIMEOUT_MS;
   }
   const parsed = typeof value === "number" ? value : Number(value.trim());
   if (!Number.isInteger(parsed) || parsed <= 0 || parsed > MAX_PROVIDER_TIMEOUT_MS) {
-    const label = provider === "openai" ? "OpenAI" : provider === "anthropic" ? "Anthropic" : "Gemini";
+    const label = provider === "openai" ? "OpenAI" : provider === "anthropic" ? "Anthropic" : provider === "gemini" ? "Gemini" : "Codex exec";
     throw new Error(`Invalid ${label} timeout "${value}". Use an integer from 1 to ${MAX_PROVIDER_TIMEOUT_MS} milliseconds.`);
   }
   return parsed;

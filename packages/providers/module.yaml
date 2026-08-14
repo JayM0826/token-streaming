@@ -14,8 +14,10 @@ test_commands:
 rules:
   - Do not hard-code API keys.
   - Keep provider authentication out of core runtime.
+  - Keep provider=auto limited to API-key-backed providers; local Codex execution must be explicit.
   - Use native provider protocols in adapters instead of leaking provider-specific request shapes into core.
   - Redact configured API keys from HTTP and transport diagnostics.
   - Keep stub provider available for offline development.
   - Resolve model selection in priority order: CLI override, manifest policy, provider default.
   - Keep model doctor checks offline unless an explicit probe is requested.
+  - Run Codex exec with ephemeral state, stdin prompts, a read-only sandbox, bounded output, timeout cleanup, and recursion protection.

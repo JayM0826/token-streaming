@@ -935,6 +935,51 @@ test("CLI exposes model doctor errors as JSON with a non-zero exit code", async 
   assert.equal(output.checks.some((check) => check.name === "openai-api-key" && check.status === "error"), true);
 });
 
+test("CLI exposes explicit Codex exec configuration without changing API auto routing", async () => {
+  const cwd = await createManifestRepo();
+  const codex = runCli(["-C", cwd, "--provider", "codex", "config", "inspect", "--json"], {
+    CODEX_EXEC_PATH: process.execPath,
+    CODEX_EXEC_MODEL: "gpt-local"
+  });
+  const automatic = runCli(["-C", cwd, "doctor", "models", "--json"], { CODEX_EXEC_PATH: process.execPath });
+
+  assert.equal(codex.effectiveProvider, "codex");
+  assert.equal(codex.providerConnection.transport, "local-exec");
+  assert.equal(codex.providerConnection.executableFound, true);
+  assert.equal(codex.providerConnection.executableSource, "configured");
+  assert.equal(codex.providerConnection.model, "gpt-local");
+  assert.equal(codex.providerConnection.cwd, cwd);
+  assert.equal(automatic.effectiveProvider, "stub");
+});
+
+test("CLI model doctor rejects a missing explicitly selected Codex executable", async () => {
+  const cwd = await createManifestRepo();
+  const result = runCliRaw(["-C", cwd, "--provider", "codex", "doctor", "models", "--json"], {
+    CODEX_EXEC_PATH: path.join(cwd, "missing-codex-executable")
+  });
+  const output = JSON.parse(result.stdout);
+
+  assert.equal(result.status, 1);
+  assert.equal(output.ok, false);
+  assert.equal(output.connection.transport, "local-exec");
+  assert.equal(output.connection.executableFound, false);
+  assert.equal(output.checks.find((check) => check.name === "codex-exec")?.status, "error");
+});
+
+test("CLI repository doctor does not mark a non-Codex executable as smoke-ready", async () => {
+  const cwd = await createManifestRepo();
+  const result = runCliRaw(["-C", cwd, "--provider", "codex", "doctor", "repo", "--json"], {
+    CODEX_EXEC_PATH: process.execPath
+  });
+  const output = JSON.parse(result.stdout);
+
+  assert.equal(result.status, 1);
+  assert.equal(output.models.connection.executableFound, true);
+  assert.equal(output.models.checks.find((check) => check.name === "codex-exec")?.status, "error");
+  assert.equal(output.liveSmoke.status, "missing-executable");
+  assert.match(output.liveSmoke.message, /did not identify itself as Codex CLI/);
+});
+
 test("CLI exposes repository doctor readiness as JSON", async () => {
   const cwd = await createManifestRepo();
   const run = runCli(["-C", cwd, "--provider", "stub", "--dry-run", "--json", "summarize this repo"]);
@@ -1377,7 +1422,8 @@ function cleanProviderEnvironment(overrides = {}) {
   for (const name of [
     "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_PROTOCOL", "OPENAI_MODEL", "OPENAI_TIMEOUT_MS",
     "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_TIMEOUT_MS",
-    "GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_TIMEOUT_MS"
+    "GEMINI_API_KEY", "GEMINI_BASE_URL", "GEMINI_MODEL", "GEMINI_TIMEOUT_MS",
+    "CODEX_EXEC_PATH", "CODEX_EXEC_MODEL", "CODEX_EXEC_TIMEOUT_MS", "CODEX_EXEC_PROVIDER_DEPTH"
   ]) {
     environment[name] = "";
   }

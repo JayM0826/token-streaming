@@ -381,7 +381,7 @@ function inferTaskKind(task: string | undefined): string {
 }
 
 function readProvider(value: unknown): ProviderName {
-  if (value === "stub" || value === "openai" || value === "anthropic" || value === "gemini" || value === "auto") {
+  if (value === "stub" || value === "openai" || value === "anthropic" || value === "gemini" || value === "codex" || value === "auto") {
     return value;
   }
   return "auto";

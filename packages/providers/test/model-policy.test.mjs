@@ -156,6 +156,23 @@ test("resolveModelSelection does not send another provider's manifest model to a
   assert.deepEqual(selection, { provider: "anthropic", source: "provider-default" });
 });
 
+test("resolveModelSelection keeps Codex explicit and does not forward an API model policy", () => {
+  const selection = resolveModelSelection({
+    mode: "max",
+    requestedProvider: "codex",
+    availableProviders: ["stub"],
+    manifest: {
+      models: {
+        default_provider: "codex",
+        max_model: "claude-sonnet-5",
+        model_candidates: ["gpt-5.5;provider=openai;quality=0.94;cost=0.75;latency=0.55;tags=max"]
+      }
+    }
+  });
+
+  assert.deepEqual(selection, { provider: "codex", source: "provider-default" });
+});
+
 test("scoreModelCandidates ranks manifest candidates by mode objective and telemetry", () => {
   const decision = scoreModelCandidates({
     mode: "economy",

@@ -24,3 +24,18 @@ for (const smoke of smokeScripts) {
     assert.equal(result.stdout, "");
   });
 }
+
+test("Codex smoke script fails clearly when the configured executable is missing", () => {
+  const result = spawnSync(process.execPath, [path.join(repoRoot, "scripts", "smoke-codex.mjs")], {
+    cwd: repoRoot,
+    env: { ...process.env, CODEX_EXEC_PATH: path.join(repoRoot, "missing-codex-executable") },
+    encoding: "utf8"
+  });
+  const output = JSON.parse(result.stdout);
+
+  assert.equal(result.status, 1);
+  assert.equal(output.kind, "model-doctor");
+  assert.equal(output.effectiveProvider, "codex");
+  assert.equal(output.connection.executableFound, false);
+  assert.equal(output.checks.some((check) => check.name === "codex-exec" && check.status === "error"), true);
+});
