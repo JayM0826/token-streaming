@@ -1017,13 +1017,16 @@ async function assertArtifactTaskIdempotencyMatch(
   input: CreateArtifactTaskRequest
 ): Promise<void> {
   const instructionSha256 = await sha256Hex(input.instruction);
-  const expectedDigest = (existing.digest_version ?? 1) >= 2
-    ? (await createDigestCommitment(instructionSha256, {
+  const digestVersion = existing.digest_version ?? 1;
+  const expectedDigest = digestVersion === 1
+    ? instructionSha256
+    : digestVersion === 2
+      ? (await createDigestCommitment(instructionSha256, {
         purpose: "artifact-instruction",
         tenantId,
         resourceId: existing.task_id
       })).digest
-    : instructionSha256;
+      : invalidPersistedDigestVersion();
   if (
     existing.artifact_id !== input.artifactId || existing.model !== input.model ||
     existing.data_class !== input.dataClass || existing.max_output_tokens !== input.maxOutputTokens ||
@@ -1031,6 +1034,10 @@ async function assertArtifactTaskIdempotencyMatch(
   ) {
     throw new ApiError("CONFLICT", "该幂等键已绑定到不同的文件任务请求。", 409);
   }
+}
+
+function invalidPersistedDigestVersion(): never {
+  throw new ApiError("INTERNAL_ERROR", "持久化文件任务摘要版本不受支持。", 500);
 }
 
 async function deletePendingChunk(chunk: ArtifactChunkRow, ownsImmutableObject = false): Promise<boolean> {

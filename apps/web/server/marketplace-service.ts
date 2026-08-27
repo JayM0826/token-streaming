@@ -42,6 +42,7 @@ import {
   decryptContent,
   decryptCredential,
   createCredentialLookupDigest,
+  createCredentialLookupDigests,
   createDigestCommitment,
   encryptContent,
   encryptCredential,
@@ -66,9 +67,13 @@ import {
   APPROVE_AUTHORIZATION_REQUEST_SQL,
   BIND_AUTHORIZATION_REVIEW_COMMAND_SQL,
   CLAIM_AUTHORIZATION_REVIEW_TARGET_SQL,
-  REJECT_AUTHORIZATION_REQUEST_SQL
+  REJECT_AUTHORIZATION_REQUEST_SQL,
+  claimAuthorizationReviewTargetWithLookupLimitSql,
+  countApprovedAgentAuthorizationsSql
 } from "./review-invariants";
 import { isAuthorizationValidityAllowed } from "./authorization-invariants";
+import { MAX_AGENT_AUTHORIZATIONS_PER_TOKEN } from "./agent-auth-invariants";
+import { isLikelySecretEvidenceReference } from "./sensitive-reference";
 
 interface SupplierRow {
   supplier_id: string;
@@ -106,8 +111,10 @@ interface AuthorizationRow {
   gateway_endpoint: string;
   encrypted_gateway_token: string;
   gateway_token_iv: string;
+  credential_key_id: string;
   gateway_token_digest: string | null;
   gateway_token_digest_version: number;
+  gateway_token_lookup_key_id: string;
   encryption_key_version: number;
   status: AuthorizationRequestView["status"];
   review_note: string | null;
@@ -141,6 +148,7 @@ interface OfferRow {
   gateway_endpoint?: string;
   encrypted_gateway_token?: string;
   gateway_token_iv?: string;
+  credential_key_id?: string;
   encryption_key_version?: number;
 }
 
@@ -244,7 +252,9 @@ export async function getDashboard(identity: RequestIdentity): Promise<Marketpla
       `SELECT o.*, s.display_name AS supplier_display_name
        FROM capacity_offers o
        JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
-       JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id AND ar.status = 'approved'
+       JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id
+         AND ar.tenant_id = o.tenant_id AND ar.supplier_id = o.supplier_id
+         AND ar.provider_id = o.provider_id AND ar.status = 'approved'
        WHERE o.status = 'active' AND o.valid_from <= ? AND o.valid_until > ?
          AND ar.valid_until > ? AND s.status = 'active' AND s.supply_enabled = 1
        ORDER BY CAST(o.price_micros_per_million_tokens AS INTEGER) ASC, o.created_at ASC LIMIT 50`
@@ -289,8 +299,10 @@ export async function getDashboard(identity: RequestIdentity): Promise<Marketpla
           `SELECT ar.*, s.display_name AS supplier_display_name
            FROM authorization_requests ar
            JOIN suppliers s ON s.supplier_id = ar.supplier_id AND s.tenant_id = ar.tenant_id
-           WHERE ar.status = 'pending' ORDER BY ar.created_at ASC LIMIT 100`
+           WHERE ar.status = 'pending' AND ar.tenant_id <> ?
+           ORDER BY ar.created_at ASC LIMIT 100`
         )
+        .bind(identity.tenantId)
         .all<AuthorizationRow>()
     : { results: [] as AuthorizationRow[] };
   const [artifacts, artifactTasks] = await Promise.all([
@@ -437,9 +449,9 @@ export async function submitAuthorizationRequest(
           request_id, tenant_id, supplier_id, provider_id, source_type, metering_mode, evidence_ref,
           model_pattern, region_code, data_classes_json, requests_per_minute, tokens_per_minute,
            concurrency, max_output_tokens, valid_until, gateway_endpoint, encrypted_gateway_token,
-           gateway_token_iv, gateway_token_digest, gateway_token_digest_version,
-           encryption_key_version, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+           gateway_token_iv, credential_key_id, gateway_token_digest, gateway_token_digest_version,
+           gateway_token_lookup_key_id, encryption_key_version, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
       )
       .bind(
         requestId,
@@ -460,8 +472,10 @@ export async function submitAuthorizationRequest(
         gateway.toString(),
         encrypted.ciphertext,
         encrypted.iv,
+        encrypted.keyId,
         gatewayTokenDigest.digest,
         gatewayTokenDigest.version,
+        gatewayTokenDigest.keyId,
         encrypted.keyVersion,
         now,
         now
@@ -490,6 +504,15 @@ export async function reviewAuthorization(
   if (input.decision !== "approve" && input.decision !== "reject") {
     throw new ApiError("INVALID_REQUEST", "审核决定必须是 approve 或 reject。", 400);
   }
+  const db = getD1();
+  const request = await db
+    .prepare("SELECT * FROM authorization_requests WHERE request_id = ?")
+    .bind(requestId)
+    .first<AuthorizationRow>();
+  if (!request) throw new ApiError("NOT_FOUND", "授权申请不存在。", 404);
+  if (request.tenant_id === identity.tenantId) {
+    throw new ApiError("REVIEWER_CONFLICT", "审核员不能审核自己租户提交的供应授权。", 403);
+  }
   const reviewBinding = `${requestId}:${input.decision}`;
   const prior = await readIdempotency(identity.tenantId, "authorization.review", input.commandId);
   if (prior) {
@@ -507,12 +530,6 @@ export async function reviewAuthorization(
   }
   await enforceTenantRateLimit(identity, "authorization.review", 60, 60 * 60_000);
 
-  const db = getD1();
-  const request = await db
-    .prepare("SELECT * FROM authorization_requests WHERE request_id = ?")
-    .bind(requestId)
-    .first<AuthorizationRow>();
-  if (!request) throw new ApiError("NOT_FOUND", "授权申请不存在。", 404);
   if (request.status !== "pending") throw new ApiError("CONFLICT", "授权申请已经完成审核。", 409);
   const now = new Date().toISOString();
   const note = normalizeOptionalText(input.reviewNote, 500);
@@ -553,8 +570,23 @@ export async function reviewAuthorization(
     request.encrypted_gateway_token,
     request.gateway_token_iv,
     request.encryption_key_version,
+    request.credential_key_id,
     { tenantId: request.tenant_id, authorizationRequestId: request.request_id }
   );
+  const [reviewCredentialLookups, legacyCredentialDigest] = await Promise.all([
+    createCredentialLookupDigests(gatewayToken),
+    sha256Hex(gatewayToken)
+  ]);
+  const approvedForCredential = await db.prepare(
+    countApprovedAgentAuthorizationsSql(reviewCredentialLookups.length)
+  ).bind(
+    now,
+    legacyCredentialDigest,
+    ...reviewCredentialLookups.flatMap((candidate) => [candidate.version, candidate.keyId, candidate.digest])
+  ).first<{ authorization_count: number }>();
+  if ((approvedForCredential?.authorization_count ?? 0) >= MAX_AGENT_AUTHORIZATIONS_PER_TOKEN) {
+    throw new ApiError("CONFLICT", "该 Agent 凭据绑定的有效授权数量已达到安全上限。", 409);
+  }
   const attestation = await attestSupplierGateway(gateway, gatewayToken, {
     providerId: request.provider_id,
     modelPattern: request.model_pattern,
@@ -579,7 +611,8 @@ export async function reviewAuthorization(
   const statements = [
     reviewTargetClaimInsert(
       db, identity.tenantId, requestId, input.commandId,
-      reviewBinding, reviewOperationToken, now
+      reviewBinding, reviewOperationToken, now,
+      { legacyCredentialDigest, credentialLookups: reviewCredentialLookups }
     ),
     guardedReviewIdempotencyInsert(
       db, identity.tenantId, input.commandId, reviewBinding,
@@ -870,6 +903,7 @@ export async function runInference(
       requiredText(offer.encrypted_gateway_token, "encryptedGatewayToken"),
       requiredText(offer.gateway_token_iv, "gatewayTokenIv"),
       offer.encryption_key_version ?? 1,
+      requiredText(offer.credential_key_id, "credentialKeyId"),
       {
         tenantId: offer.tenant_id,
         authorizationRequestId: offer.authorization_request_id
@@ -1216,7 +1250,7 @@ async function selectOffer(buyerTenantId: string, input: RunInferenceRequest, no
     .prepare(
       `SELECT o.*, s.display_name AS supplier_display_name, s.tenant_id AS supplier_tenant_id,
               ar.gateway_endpoint, ar.encrypted_gateway_token, ar.gateway_token_iv,
-              ar.encryption_key_version
+              ar.credential_key_id, ar.encryption_key_version
        FROM capacity_offers o
        JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
        JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id AND ar.status = 'approved'
@@ -1411,13 +1445,16 @@ async function assertInferenceIdempotencyMatch(
   input: RunInferenceRequest
 ): Promise<void> {
   const inputSha256 = await sha256Hex(input.input);
-  const expectedDigest = (existing.digest_version ?? 1) >= 2
-    ? (await createDigestCommitment(inputSha256, {
+  const digestVersion = existing.digest_version ?? 1;
+  const expectedDigest = digestVersion === 1
+    ? inputSha256
+    : digestVersion === 2
+      ? (await createDigestCommitment(inputSha256, {
         purpose: "prompt",
         tenantId,
         resourceId: existing.job_id
       })).digest
-    : inputSha256;
+      : invalidPersistedDigestVersion();
   if (
     existing.prompt_digest !== expectedDigest ||
     existing.model !== input.model ||
@@ -1427,6 +1464,10 @@ async function assertInferenceIdempotencyMatch(
   ) {
     throw new ApiError("CONFLICT", "该幂等键已绑定到不同的推理请求。", 409);
   }
+}
+
+function invalidPersistedDigestVersion(): never {
+  throw new ApiError("INTERNAL_ERROR", "持久化内容摘要版本不受支持。", 500);
 }
 
 async function readUsageSummary(tenantId: string): Promise<MarketplaceDashboardSnapshot["usage"]> {
@@ -1730,10 +1771,36 @@ function reviewTargetClaimInsert(
   commandId: string,
   resourceBinding: string,
   operationToken: string,
-  createdAt: string
+  createdAt: string,
+  lookupLimit?: {
+    legacyCredentialDigest: string;
+    credentialLookups: ReadonlyArray<{ digest: string; version: 2 | 3; keyId: string }>;
+  }
 ): D1PreparedStatement {
+  if (lookupLimit) {
+    return db.prepare(
+      claimAuthorizationReviewTargetWithLookupLimitSql(lookupLimit.credentialLookups.length)
+    ).bind(
+      requestId,
+      operationToken,
+      createdAt,
+      requestId,
+      reviewerTenantId,
+      createdAt,
+      lookupLimit.legacyCredentialDigest,
+      ...lookupLimit.credentialLookups.flatMap((candidate) => [
+        candidate.version,
+        candidate.keyId,
+        candidate.digest
+      ]),
+      MAX_AGENT_AUTHORIZATIONS_PER_TOKEN,
+      reviewerTenantId,
+      commandId,
+      resourceBinding
+    );
+  }
   return db.prepare(CLAIM_AUTHORIZATION_REVIEW_TARGET_SQL).bind(
-    requestId, operationToken, createdAt, requestId,
+    requestId, operationToken, createdAt, requestId, reviewerTenantId,
     reviewerTenantId, commandId, resourceBinding
   );
 }
@@ -1871,6 +1938,13 @@ function validateAuthorizationInput(input: CreateAuthorizationRequest): void {
   assertIdentifier(input.commandId, "commandId");
   assertIdentifier(input.providerId, "providerId");
   assertIdentifier(input.evidenceRef, "evidenceRef");
+  if (isLikelySecretEvidenceReference(input.evidenceRef)) {
+    throw new ApiError(
+      "INVALID_REQUEST",
+      "evidenceRef 只能填写合同、许可或证明编号，不能包含 API Key、令牌或 JWT。",
+      400
+    );
+  }
   assertText(input.modelPattern, "modelPattern", 120);
   if (!/^[A-Z]{2}$/.test(input.regionCode.toUpperCase())) throw new ApiError("INVALID_REQUEST", "regionCode 必须是两位地区代码。", 400);
   if (!["api-project", "commercial-account", "subscription-plan", "self-hosted-license"].includes(input.sourceType)) {

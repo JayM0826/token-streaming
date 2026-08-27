@@ -137,8 +137,12 @@ export async function claimArtifactTask(
       a.size_bytes AS artifact_size_bytes, a.manifest_sha256 AS artifact_manifest_sha256,
       o.provider_id, o.price_micros_per_million_tokens
      FROM artifact_tasks t
-     JOIN artifacts a ON a.artifact_id = t.artifact_id AND a.status = 'ready'
-     JOIN capacity_offers o ON o.offer_id = t.offer_id AND o.status = 'active' AND o.valid_until > ?
+     JOIN artifacts a ON a.artifact_id = t.artifact_id
+       AND a.tenant_id = t.buyer_tenant_id AND a.status = 'ready'
+     JOIN capacity_offers o ON o.offer_id = t.offer_id
+       AND o.tenant_id = t.supplier_tenant_id
+       AND o.authorization_request_id = t.authorization_request_id
+       AND o.status = 'active' AND o.valid_until > ?
      WHERE t.supplier_tenant_id = ? AND t.status = 'queued'
      ORDER BY t.created_at ASC LIMIT 20`
   ).bind(now, identity.supplierTenantId).all<WorkerTaskRow>();
@@ -601,8 +605,10 @@ async function requireLeasedTask(
       a.size_bytes AS artifact_size_bytes, a.manifest_sha256 AS artifact_manifest_sha256,
       o.provider_id, o.price_micros_per_million_tokens
      FROM artifact_tasks t
-     JOIN artifacts a ON a.artifact_id = t.artifact_id
+     JOIN artifacts a ON a.artifact_id = t.artifact_id AND a.tenant_id = t.buyer_tenant_id
      JOIN capacity_offers o ON o.offer_id = t.offer_id
+       AND o.tenant_id = t.supplier_tenant_id
+       AND o.authorization_request_id = t.authorization_request_id
      WHERE t.task_id = ? AND t.supplier_tenant_id = ? AND t.lease_digest = ?
        AND t.lease_expires_at > ? AND t.execution_deadline_at > ?
        AND t.status IN ('claimed', 'running')

@@ -35,11 +35,11 @@ R2 删除使用独立于分块 metadata 的 `artifact_object_deletions` 墓碑�
 
 ### 密钥分域、记录绑定与内容承诺
 
-生产运行时使用四个独立的 256 位密钥：凭据密钥、可重放内容密钥、artifact 分块密钥和摘要承诺密钥。凭据及内容使用 AES-256-GCM；AAD 绑定版本、用途、tenant 和资源 ID，artifact AAD 额外绑定分块编号和明文摘要。密文或 IV 被移动到另一租户、资源或用途时必须解密失败。
+生产运行时的基础加密材料分为凭据、可重放内容、artifact 分块和摘要承诺四个独立的 256 位域；ADR 0008 又把 Gateway token lookup 从长期摘要承诺生命周期中拆成独立 HMAC keyring，同时仅以 legacy id 兼容旧 commitment HMAC。凭据及内容使用 AES-256-GCM；AAD 绑定版本、用途、tenant 和资源 ID，artifact AAD 额外绑定分块编号和明文摘要。密文或 IV 被移动到另一租户、资源、用途或新格式 key id 时必须解密失败。
 
 数据库不再为新任务保存可直接离线枚举的原始内容 SHA-256。节点仍返回原始摘要供当次执行校验，控制平面验证签名后，使用独立 HMAC-SHA256 承诺密钥将摘要绑定用途、tenant 和资源 ID，再只保存版本 2 承诺。旧记录标记版本 1；旧密文保持可读直到过期，迁移为只增加字段，不重写账本或证据历史。文件物理清除同时清空活动 manifest 摘要。
 
-0000–0010 全迁移链必须通过真实临时 D1 自动化测试：测试先应用 0000–0003 并写入旧版推理、文件和文件任务，再应用 0004–0010，验证 20 张表、旧行保留、默认模式与版本字段、独立 R2 删除墓碑、结算分录唯一索引、取消/预留字段及 6 小时执行期限字段正确。迁移会把无法安全继承新租约约束的旧 `reserved`/`running` 推理和 `claimed`/`running` artifact task 终止并释放预留，而不是让无上限的旧执行继续。生产冷启动还要逐列检查并补齐全部增量迁移；多个 Worker isolate 同时迁移时，失败方必须重新读取 schema，只有目标列已存在才能把竞争视为成功。只检查 SQL 文本不作为迁移成功证据。
+0000–0011 全迁移链必须通过真实临时 D1 自动化测试：测试先应用 0000–0003 并写入旧版推理、文件和文件任务，再应用 0004–0011，验证 21 张表、旧行保留、默认模式与版本/key-id 字段、cryptographic canary、独立 R2 删除墓碑、结算分录唯一索引、取消/预留字段及 6 小时执行期限字段正确。迁移会把无法安全继承新租约约束的旧 `reserved`/`running` 推理和 `claimed`/`running` artifact task 终止并释放预留，而不是让无上限的旧执行继续。生产冷启动还要逐列检查并补齐全部增量迁移；多个 Worker isolate 同时迁移时，失败方必须重新读取 schema，只有目标列已存在才能把竞争视为成功。只检查 SQL 文本不作为迁移成功证据。
 
 ### 接口与本地客户端防护
 
@@ -52,4 +52,4 @@ Supplier Agent 管理服务只监听 `127.0.0.1`，严格校验 Host 与 Origin�
 - 供应节点或 Provider 仍可在执行时看到明文。真正的执行方不可见需要平台管理的可信执行环境、远程证明、内存加密和可审计镜像，或客户自有节点。
 - 自动到期由有界流量清理和 bearer-authenticated 独立计划任务共同触发，严格任务终态也会发起清理。维护结果除对象删除队列外，还暴露 `unclaimedExpiredArtifacts` 和 `pendingArtifactTombstones`，并分别对“过期后 24 小时仍未取得清除所有权”和“开始清除后 24 小时仍有未 tombstone generation”计数；任一 breach 都使计划监控失败。GitHub 托管计划任务不是合规级定时器；公开商业发布前仍应增加受监控的专用 scheduler、KMS/HSM envelope key、删除失败告警和可导出的清除证明。
 - 节点签名证明 hardened Agent 观察到的模型、摘要和用量，不是 Provider 的独立签名。高保证档位仍需 Provider 官方回执或可信执行环境。
-- 生产部署缺少任一密钥、密钥不是 32 字节或四个分域重复时失败关闭：`MARKETPLACE_CREDENTIAL_KEY`、`MARKETPLACE_CONTENT_KEY`、`MARKETPLACE_ARTIFACT_KEY`、`MARKETPLACE_COMMITMENT_KEY`。维护任务每次运行都会验证该条件，但当前仍须保持密钥稳定并单独备份，不能在没有版本化 keyring 迁移的情况下直接轮换。
+- 生产部署缺少任一密钥、密钥不是 32 字节或非迁移别名的分域重复时失败关闭。ADR 0008 已为 Gateway credential AES 和独立 lookup HMAC 增加版本化 keyring、持久 canary、引用退役门禁与有界迁移；旧单值 secret 只能作为 dual-read legacy alias，不能原地覆盖。`MARKETPLACE_CONTENT_KEY`、`MARKETPLACE_ARTIFACT_KEY` 与通用 `MARKETPLACE_COMMITMENT_KEY` 仍须保持稳定并单独备份，直到各自的 key-id 迁移完成。

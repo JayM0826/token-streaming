@@ -54,5 +54,10 @@ jobs:
               raise SystemExit("an artifact generation was not tombstoned within the retry horizon")
           if payload.get("cryptographicConfiguration") != "valid":
               raise SystemExit("runtime cryptographic configuration was not validated")
+          if payload.get("cryptographicCanaries") != "valid":
+              raise SystemExit("runtime cryptographic key canaries were not validated")
+          legacy_content_refs = payload.get("legacyCredentialContentReferences")
+          if not isinstance(legacy_content_refs, int) or legacy_content_refs < 0:
+              raise SystemExit("legacy credential content reference count was not reported")
           print(f"retention sweep completed at {payload.get('executedAt', 'unknown')}")
           PY

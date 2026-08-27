@@ -3,8 +3,12 @@ import { SUPPLIER_GATEWAY_HEADERS, createSupplierGatewaySignaturePayload } from 
 import { ensureSchema, getD1 } from "@/db";
 import { ApiError, readBoundedText } from "./http";
 import { enforceScopeRateLimit } from "./rate-limit";
-import { createCredentialLookupDigest, sha256Hex } from "./security";
-import { INSERT_AGENT_NONCE_SQL } from "./agent-auth-invariants";
+import { createCredentialLookupDigest, createCredentialLookupDigests, sha256Hex } from "./security";
+import {
+  MAX_AGENT_AUTHORIZATIONS_PER_TOKEN,
+  claimAgentNonceNamespacesSql,
+  migrateAgentLookupNamespacesSql
+} from "./agent-auth-invariants";
 
 export interface AgentAuthorizationIdentity {
   credentialDigest: string;
@@ -25,7 +29,9 @@ interface AgentAuthorizationRow {
   supplier_id: string;
   provider_id: string;
   model_pattern: string;
+  gateway_token_digest: string;
   gateway_token_digest_version: number;
+  gateway_token_lookup_key_id: string;
 }
 
 export async function readSignedAgentJson<T>(
@@ -55,11 +61,12 @@ export async function authenticateAgentRequest(
   await ensureSchema();
   const gatewayToken = bearerToken(request.headers.get("authorization"));
   const edgeAddress = request.headers.get("cf-connecting-ip")?.trim() || "edge-address-unavailable";
-  const [credentialLookup, legacyCredentialDigest, preAuthScope] = await Promise.all([
-    createCredentialLookupDigest(gatewayToken),
+  const [credentialLookups, legacyCredentialDigest, preAuthScope] = await Promise.all([
+    createCredentialLookupDigests(gatewayToken),
     sha256Hex(gatewayToken),
     createCredentialLookupDigest(`agent-edge:${edgeAddress}`)
   ]);
+  const credentialLookup = credentialLookups[0]!;
   const credentialDigest = credentialLookup.digest;
   await enforceScopeRateLimit(
     `agent-auth-${preAuthScope.digest.slice(0, 48)}`,
@@ -69,17 +76,24 @@ export async function authenticateAgentRequest(
   );
   const db = getD1();
   const now = new Date().toISOString();
+  const keyedLookupConditions = credentialLookups.map(() =>
+    "(ar.gateway_token_digest_version = ? AND ar.gateway_token_lookup_key_id = ? AND ar.gateway_token_digest = ?)"
+  ).join(" OR ");
   const resultPromise = db.prepare(
     `SELECT ar.request_id, ar.tenant_id, ar.supplier_id, ar.provider_id, ar.model_pattern,
-       ar.gateway_token_digest_version
+       ar.gateway_token_digest, ar.gateway_token_digest_version, ar.gateway_token_lookup_key_id
      FROM authorization_requests ar
      JOIN suppliers s ON s.supplier_id = ar.supplier_id AND s.tenant_id = ar.tenant_id
-     WHERE ((ar.gateway_token_digest_version = 2 AND ar.gateway_token_digest = ?)
-         OR (ar.gateway_token_digest_version = 1 AND ar.gateway_token_digest = ?))
+     WHERE ((ar.gateway_token_digest_version = 1 AND ar.gateway_token_digest = ?)
+         OR ${keyedLookupConditions})
        AND ar.status = 'approved' AND ar.valid_until > ?
        AND s.status = 'active' AND s.supply_enabled = 1
-     ORDER BY ar.created_at ASC LIMIT 100`
-  ).bind(credentialDigest, legacyCredentialDigest, now).all<AgentAuthorizationRow>();
+     ORDER BY ar.created_at ASC LIMIT ${MAX_AGENT_AUTHORIZATIONS_PER_TOKEN + 1}`
+  ).bind(
+    legacyCredentialDigest,
+    ...credentialLookups.flatMap((candidate) => [candidate.version, candidate.keyId, candidate.digest]),
+    now
+  ).all<AgentAuthorizationRow>();
 
   const timestamp = requiredHeader(request, SUPPLIER_GATEWAY_HEADERS.timestamp, /^\d{13}$/);
   const nonce = requiredHeader(request, SUPPLIER_GATEWAY_HEADERS.nonce, /^[A-Za-z0-9_-]{16,128}$/);
@@ -112,27 +126,62 @@ export async function authenticateAgentRequest(
     throw new ApiError("INTERNAL_ERROR", "Agent 凭据错误地绑定了多个供应主体。", 500);
   }
   await enforceScopeRateLimit(`agent-${credentialDigest}`, "agent.signed-request", 600, 5 * 60_000);
-  const legacyRows = result.results.filter((row) => row.gateway_token_digest_version === 1);
-  if (legacyRows.length > 0) {
-    await db.batch(legacyRows.map((row) => db.prepare(
-      `UPDATE authorization_requests SET gateway_token_digest = ?, gateway_token_digest_version = 2,
-         updated_at = ? WHERE request_id = ? AND gateway_token_digest_version = 1
-         AND gateway_token_digest = ?`
-    ).bind(credentialDigest, now, row.request_id, legacyCredentialDigest)));
-  }
   await db.prepare(
     `DELETE FROM agent_request_nonces WHERE rowid IN (
        SELECT rowid FROM agent_request_nonces WHERE expires_at < ? ORDER BY expires_at ASC LIMIT 100
      )`
   ).bind(now).run();
   const nonceExpiresAt = new Date(timestampMs + 5 * 60_000).toISOString();
-  const inserted = await db.batch([
-    db.prepare(INSERT_AGENT_NONCE_SQL).bind(credentialDigest, nonce, nonceExpiresAt),
-    db.prepare(INSERT_AGENT_NONCE_SQL).bind(legacyCredentialDigest, nonce, nonceExpiresAt)
-  ]);
-  if (inserted.some((result) => (result.meta.changes ?? 0) !== 1)) {
+  const nonceNamespaces = [...new Set([
+    legacyCredentialDigest,
+    ...credentialLookups.map((candidate) => candidate.digest)
+  ])];
+  const inserted = await db.prepare(claimAgentNonceNamespacesSql(nonceNamespaces.length)).bind(
+    ...nonceNamespaces,
+    nonce,
+    nonceExpiresAt,
+    nonce
+  ).run();
+  if ((inserted.meta.changes ?? 0) !== nonceNamespaces.length) {
     throw new ApiError("CONFLICT", "Agent 请求 nonce 已经使用。", 409);
   }
+  if (result.results.length > MAX_AGENT_AUTHORIZATIONS_PER_TOKEN) {
+    await migrateEveryReadableLookupNamespace(
+      db,
+      credentialLookup,
+      credentialLookups,
+      legacyCredentialDigest,
+      now
+    );
+    throw new ApiError("CONFLICT", "Agent 凭据绑定的有效授权数量超过安全上限。", 409);
+  }
+  const staleLookupRows = result.results.filter((row) =>
+    row.gateway_token_digest_version !== credentialLookup.version ||
+    row.gateway_token_lookup_key_id !== credentialLookup.keyId ||
+    row.gateway_token_digest !== credentialLookup.digest
+  );
+  if (staleLookupRows.length > 0) {
+    const migrated = await db.batch(staleLookupRows.map((row) => db.prepare(
+      `UPDATE authorization_requests SET gateway_token_digest = ?, gateway_token_digest_version = ?,
+         gateway_token_lookup_key_id = ?, updated_at = ?
+       WHERE request_id = ? AND gateway_token_digest_version = ?
+         AND gateway_token_lookup_key_id = ? AND gateway_token_digest = ?`
+    ).bind(
+      credentialLookup.digest, credentialLookup.version, credentialLookup.keyId, now,
+      row.request_id, row.gateway_token_digest_version,
+      row.gateway_token_lookup_key_id, row.gateway_token_digest
+    )));
+    if (migrated.some((entry) => (entry.meta.changes ?? 0) !== 1)) {
+      throw new ApiError("CONFLICT", "Agent 凭据在鉴权期间发生变化。", 409, true);
+    }
+  }
+  await migrateEveryReadableLookupNamespace(
+    db,
+    credentialLookup,
+    credentialLookups,
+    legacyCredentialDigest,
+    now
+  );
   return {
     credentialDigest,
     gatewayToken,
@@ -145,6 +194,26 @@ export async function authenticateAgentRequest(
       modelPattern: row.model_pattern
     }))
   };
+}
+
+async function migrateEveryReadableLookupNamespace(
+  db: D1Database,
+  active: { digest: string; version: 2 | 3; keyId: string },
+  readable: ReadonlyArray<{ digest: string; version: 2 | 3; keyId: string }>,
+  legacyDigest: string,
+  now: string
+): Promise<void> {
+  await db.prepare(migrateAgentLookupNamespacesSql(readable.length)).bind(
+    active.digest,
+    active.version,
+    active.keyId,
+    now,
+    active.version,
+    active.keyId,
+    active.digest,
+    legacyDigest,
+    ...readable.flatMap((candidate) => [candidate.version, candidate.keyId, candidate.digest])
+  ).run();
 }
 
 function bearerToken(value: string | null): string {

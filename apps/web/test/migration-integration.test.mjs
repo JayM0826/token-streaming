@@ -42,13 +42,13 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
       .sort();
     assert.deepEqual(
       migrations.map((name) => name.slice(0, 4)),
-      ["0000", "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010"]
+      ["0000", "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011"]
     );
     const migrationSources = await Promise.all(migrations.map((name) => readMigration(name)));
     const expectedTables = migrationSources
       .flatMap((sql) => [...sql.matchAll(/CREATE TABLE `([^`]+)`/g)].map((match) => match[1]))
       .sort();
-    assert.equal(expectedTables.length, 20);
+    assert.equal(expectedTables.length, 21);
 
     for (const migration of migrations.slice(0, 4)) {
       await runWrangler(configPath, stateRoot, ["--file", path.join(webRoot, "drizzle", migration)]);
@@ -56,9 +56,14 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
 
     await runWrangler(configPath, stateRoot, ["--command", legacyFixtures]);
 
-    for (const migration of migrations.slice(4)) {
+    for (const migration of migrations.slice(4, -1)) {
       await runWrangler(configPath, stateRoot, ["--file", path.join(webRoot, "drizzle", migration)]);
     }
+    await runWrangler(configPath, stateRoot, ["--command", preKeyringAuthorizationFixtures]);
+    await runWrangler(configPath, stateRoot, [
+      "--file",
+      path.join(webRoot, "drizzle", migrations.at(-1))
+    ]);
 
     const rows = await query(configPath, stateRoot, `
       SELECT 'inference' AS kind, privacy_mode, content_key_version, content_purged_at, digest_version
@@ -112,6 +117,56 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
     assertColumn(taskColumns, "execution_deadline_at", { type: "TEXT", notnull: 0, default: null });
     const eventColumns = await query(configPath, stateRoot, "PRAGMA table_info(marketplace_events);");
     assertColumn(eventColumns, "schema_version", { type: "INTEGER", notnull: 1, default: "1" });
+    const authorizationColumns = await query(configPath, stateRoot, "PRAGMA table_info(authorization_requests);");
+    assertColumn(authorizationColumns, "credential_key_id", {
+      type: "TEXT", notnull: 1, default: "'legacy-credential-v2'"
+    });
+    assertColumn(authorizationColumns, "gateway_token_lookup_key_id", {
+      type: "TEXT", notnull: 1, default: "'legacy-commitment-v2'"
+    });
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT request_id, encrypted_gateway_token, gateway_token_iv,
+        gateway_token_digest, gateway_token_digest_version, encryption_key_version,
+        credential_key_id, gateway_token_lookup_key_id
+      FROM authorization_requests
+      WHERE request_id IN ('legacy-authorization-v1', 'legacy-authorization-v2')
+      ORDER BY request_id;
+    `), [
+      {
+        request_id: "legacy-authorization-v1",
+        encrypted_gateway_token: "legacy-ciphertext-v1",
+        gateway_token_iv: "legacy-iv-v1",
+        gateway_token_digest: "legacy-raw-digest-v1",
+        gateway_token_digest_version: 1,
+        encryption_key_version: 1,
+        credential_key_id: "legacy-credential-v2",
+        gateway_token_lookup_key_id: "legacy-commitment-v2"
+      },
+      {
+        request_id: "legacy-authorization-v2",
+        encrypted_gateway_token: "legacy-ciphertext-v2",
+        gateway_token_iv: "legacy-iv-v2",
+        gateway_token_digest: "legacy-keyed-digest-v2",
+        gateway_token_digest_version: 2,
+        encryption_key_version: 2,
+        credential_key_id: "legacy-credential-v2",
+        gateway_token_lookup_key_id: "legacy-commitment-v2"
+      }
+    ]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT request_id, encrypted_gateway_token, gateway_token_iv, gateway_token_digest,
+        credential_key_id, gateway_token_lookup_key_id
+      FROM authorization_requests WHERE request_id = 'legacy-authorization-scrubbed';
+    `), [{
+      request_id: "legacy-authorization-scrubbed",
+      encrypted_gateway_token: "",
+      gateway_token_iv: "",
+      gateway_token_digest: null,
+      credential_key_id: "legacy-credential-v2",
+      gateway_token_lookup_key_id: "legacy-commitment-v2"
+    }]);
+    const canaryColumns = await query(configPath, stateRoot, "PRAGMA table_info(cryptographic_key_canaries);");
+    assertColumn(canaryColumns, "format_version", { type: "INTEGER", notnull: 1, default: null });
     assert.deepEqual(await query(configPath, stateRoot, `
       SELECT event_id, schema_version, payload_json FROM marketplace_events
       WHERE event_id = 'legacy-event';
@@ -141,13 +196,28 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
 
     const hardeningIndexes = await query(configPath, stateRoot, `
       SELECT name FROM sqlite_master WHERE type = 'index'
-        AND name IN ('idx_authorization_requests_credential_status', 'idx_agent_request_nonces_expires')
+        AND name IN (
+          'idx_authorization_requests_credential_status',
+          'idx_authorization_requests_lookup_status',
+          'idx_agent_request_nonces_expires',
+          'idx_cryptographic_key_canaries_domain_key'
+        )
       ORDER BY name;
     `);
     assert.deepEqual(hardeningIndexes, [
       { name: "idx_agent_request_nonces_expires" },
-      { name: "idx_authorization_requests_credential_status" }
+      { name: "idx_authorization_requests_credential_status" },
+      { name: "idx_authorization_requests_lookup_status" },
+      { name: "idx_cryptographic_key_canaries_domain_key" }
     ]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT name, "unique" AS is_unique, partial
+      FROM pragma_index_list('cryptographic_key_canaries')
+      WHERE name = 'idx_cryptographic_key_canaries_domain_key';
+    `), [{ name: "idx_cryptographic_key_canaries_domain_key", is_unique: 1, partial: 0 }]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT name FROM pragma_index_info('idx_cryptographic_key_canaries_domain_key') ORDER BY seqno;
+    `), [{ name: "domain" }, { name: "key_id" }]);
 
     const deletionColumns = await query(configPath, stateRoot, "PRAGMA table_info(artifact_object_deletions);");
     assertColumn(deletionColumns, "storage_key", { type: "TEXT", notnull: 1, default: null });
@@ -264,5 +334,49 @@ const legacyFixtures = `
     'running-artifact-idempotency', 'model-legacy', 'standard', 'raw-running-instruction', 'ciphertext-running', 'iv-running',
     64, 256, '1000', 'running', 'legacy-worker', 'legacy-lease', '2026-08-26T00:00:00.000Z',
     '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z'
+  );
+  INSERT INTO authorization_requests (
+    request_id, tenant_id, supplier_id, provider_id, source_type, metering_mode,
+    evidence_ref, model_pattern, region_code, data_classes_json,
+    requests_per_minute, tokens_per_minute, concurrency, max_output_tokens,
+    valid_until, gateway_endpoint, encrypted_gateway_token, gateway_token_iv,
+    gateway_token_digest, encryption_key_version, status, created_at, updated_at
+  ) VALUES (
+    'legacy-authorization-v1', 'legacy-supplier-tenant', 'legacy-supplier', 'legacy-provider',
+    'personal-api-key', 'provider-reported', 'legacy-evidence-v1', 'legacy-model', 'CN', '["P0"]',
+    10, 1000, 1, 64, '2099-01-01T00:00:00.000Z', 'https://gateway.example.test/v3',
+    'legacy-ciphertext-v1', 'legacy-iv-v1', 'legacy-raw-digest-v1', 1, 'approved',
+    '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z'
+  );
+`;
+
+const preKeyringAuthorizationFixtures = `
+  INSERT INTO authorization_requests (
+    request_id, tenant_id, supplier_id, provider_id, source_type, metering_mode,
+    evidence_ref, model_pattern, region_code, data_classes_json,
+    requests_per_minute, tokens_per_minute, concurrency, max_output_tokens,
+    valid_until, gateway_endpoint, encrypted_gateway_token, gateway_token_iv,
+    gateway_token_digest, gateway_token_digest_version, encryption_key_version,
+    status, created_at, updated_at
+  ) VALUES (
+    'legacy-authorization-v2', 'legacy-supplier-tenant', 'legacy-supplier', 'legacy-provider',
+    'personal-api-key', 'provider-reported', 'legacy-evidence-v2', 'legacy-model', 'CN', '["P0"]',
+    10, 1000, 1, 64, '2099-01-01T00:00:00.000Z', 'https://gateway.example.test/v3',
+    'legacy-ciphertext-v2', 'legacy-iv-v2', 'legacy-keyed-digest-v2', 2, 2,
+    'approved', '2026-08-26T00:00:00.000Z', '2026-08-26T00:00:00.000Z'
+  );
+  INSERT INTO authorization_requests (
+    request_id, tenant_id, supplier_id, provider_id, source_type, metering_mode,
+    evidence_ref, model_pattern, region_code, data_classes_json,
+    requests_per_minute, tokens_per_minute, concurrency, max_output_tokens,
+    valid_until, gateway_endpoint, encrypted_gateway_token, gateway_token_iv,
+    gateway_token_digest, gateway_token_digest_version, encryption_key_version,
+    status, created_at, updated_at
+  ) VALUES (
+    'legacy-authorization-scrubbed', 'legacy-supplier-tenant', 'legacy-supplier', 'legacy-provider',
+    'personal-api-key', 'provider-reported', 'legacy-evidence-scrubbed', 'legacy-model', 'CN', '["P0"]',
+    10, 1000, 1, 64, '2026-08-26T00:00:00.000Z', 'https://gateway.example.test/v3',
+    '', '', NULL, 2, 2, 'rejected',
+    '2026-08-26T00:00:00.000Z', '2026-08-26T00:00:00.000Z'
   );
 `;

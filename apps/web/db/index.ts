@@ -63,6 +63,16 @@ const RUNTIME_COLUMN_MIGRATIONS = [
     sql: "ALTER TABLE `authorization_requests` ADD `gateway_token_digest` text"
   },
   {
+    table: "authorization_requests",
+    column: "credential_key_id",
+    sql: "ALTER TABLE `authorization_requests` ADD `credential_key_id` text DEFAULT 'legacy-credential-v2' NOT NULL"
+  },
+  {
+    table: "authorization_requests",
+    column: "gateway_token_lookup_key_id",
+    sql: "ALTER TABLE `authorization_requests` ADD `gateway_token_lookup_key_id` text DEFAULT 'legacy-commitment-v2' NOT NULL"
+  },
+  {
     table: "artifact_tasks",
     column: "privacy_mode",
     sql: "ALTER TABLE `artifact_tasks` ADD `privacy_mode` text DEFAULT 'standard' NOT NULL"
@@ -165,7 +175,8 @@ const RUNTIME_COLUMN_MIGRATIONS = [
 ] as const;
 
 const POST_COLUMN_SCHEMA_STATEMENTS = [
-  "CREATE INDEX IF NOT EXISTS idx_authorization_requests_credential_status ON authorization_requests (gateway_token_digest_version, gateway_token_digest, status, valid_until)"
+  "CREATE INDEX IF NOT EXISTS idx_authorization_requests_credential_status ON authorization_requests (gateway_token_digest_version, gateway_token_digest, status, valid_until)",
+  "CREATE INDEX IF NOT EXISTS idx_authorization_requests_lookup_status ON authorization_requests (gateway_token_digest_version, gateway_token_lookup_key_id, gateway_token_digest, status, valid_until)"
 ] as const;
 
 const SCHEMA_STATEMENTS = [
@@ -212,8 +223,10 @@ const SCHEMA_STATEMENTS = [
     gateway_endpoint TEXT NOT NULL,
     encrypted_gateway_token TEXT NOT NULL,
     gateway_token_iv TEXT NOT NULL,
+    credential_key_id TEXT NOT NULL DEFAULT 'legacy-credential-v2',
     gateway_token_digest TEXT,
     gateway_token_digest_version INTEGER NOT NULL DEFAULT 1,
+    gateway_token_lookup_key_id TEXT NOT NULL DEFAULT 'legacy-commitment-v2',
     encryption_key_version INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
     review_note TEXT,
@@ -382,6 +395,16 @@ const SCHEMA_STATEMENTS = [
   )`,
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_rate_limits_bucket ON api_rate_limits (scope_key, action, window_started_at)",
   "CREATE INDEX IF NOT EXISTS idx_api_rate_limits_expires ON api_rate_limits (expires_at)",
+  `CREATE TABLE IF NOT EXISTS cryptographic_key_canaries (
+    canary_id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    format_version INTEGER NOT NULL,
+    ciphertext TEXT NOT NULL,
+    iv TEXT,
+    created_at TEXT NOT NULL
+  )`,
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_cryptographic_key_canaries_domain_key ON cryptographic_key_canaries (domain, key_id)",
   `CREATE TABLE IF NOT EXISTS artifacts (
     artifact_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,

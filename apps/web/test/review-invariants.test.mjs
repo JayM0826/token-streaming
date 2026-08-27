@@ -7,8 +7,10 @@ import {
   APPROVE_AUTHORIZATION_REQUEST_SQL,
   BIND_AUTHORIZATION_REVIEW_COMMAND_SQL,
   CLAIM_AUTHORIZATION_REVIEW_TARGET_SQL,
-  REJECT_AUTHORIZATION_REQUEST_SQL
+  REJECT_AUTHORIZATION_REQUEST_SQL,
+  claimAuthorizationReviewTargetWithLookupLimitSql
 } from "../server/review-invariants.ts";
+import { MAX_AGENT_AUTHORIZATIONS_PER_TOKEN } from "../server/agent-auth-invariants.ts";
 
 const now = "2026-08-28T00:00:00.000Z";
 
@@ -50,12 +52,62 @@ test("a global target claim serializes different administrator tenants", () => {
   ).get().count, 0);
 });
 
+test("an administrator cannot claim an authorization from their own supplier tenant", () => {
+  const db = reviewDatabase();
+  seedRequest(db, "request-one");
+
+  assert.equal(approve(db, "supplier-tenant", "self-approve", "request-one", "operation-self"), 0);
+  assert.deepEqual(statuses(db), [
+    { request_id: "request-one", status: "pending", review_command_id: null }
+  ]);
+  assert.equal(db.prepare(
+    "SELECT COUNT(*) AS count FROM idempotency_keys WHERE idempotency_key = 'self-approve' OR resource_id = 'operation-self'"
+  ).get().count, 0);
+  assert.deepEqual({ ...db.prepare(
+    "SELECT status, version FROM suppliers WHERE supplier_id = 'supplier-one'"
+  ).get() }, { status: "pending", version: 1 });
+});
+
+test("the approval claim atomically refuses a 101st valid authorization for one token", () => {
+  const db = reviewDatabase();
+  seedRequest(db, "request-limit");
+  seedApprovedCredentialRows(db, MAX_AGENT_AUTHORIZATIONS_PER_TOKEN);
+
+  assert.equal(approveWithLookupLimit(
+    db, "admin-a", "limit-command", "request-limit", "operation-limit"
+  ), 0);
+  assert.deepEqual(statuses(db).find((row) => row.request_id === "request-limit"), {
+    request_id: "request-limit",
+    status: "pending",
+    review_command_id: null
+  });
+  assert.equal(db.prepare(
+    "SELECT COUNT(*) AS count FROM idempotency_keys WHERE idempotency_key = 'request-limit' OR resource_id = 'operation-limit'"
+  ).get().count, 0);
+});
+
+test("the approval claim admits the bounded 100th valid authorization", () => {
+  const db = reviewDatabase();
+  seedRequest(db, "request-boundary");
+  seedApprovedCredentialRows(db, MAX_AGENT_AUTHORIZATIONS_PER_TOKEN - 1);
+
+  assert.equal(approveWithLookupLimit(
+    db, "admin-a", "boundary-command", "request-boundary", "operation-boundary"
+  ), 1);
+  assert.deepEqual(statuses(db).find((row) => row.request_id === "request-boundary"), {
+    request_id: "request-boundary",
+    status: "approved",
+    review_command_id: "boundary-command"
+  });
+});
+
 function reject(db, reviewerTenantId, commandId, requestId, operationToken) {
   const binding = `${requestId}:reject`;
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare(CLAIM_AUTHORIZATION_REVIEW_TARGET_SQL).run(
-      requestId, operationToken, now, requestId, reviewerTenantId, commandId, binding
+      requestId, operationToken, now, requestId, reviewerTenantId,
+      reviewerTenantId, commandId, binding
     );
     db.prepare(BIND_AUTHORIZATION_REVIEW_COMMAND_SQL).run(
       reviewerTenantId, commandId, binding, now, requestId, operationToken
@@ -77,7 +129,39 @@ function approve(db, reviewerTenantId, commandId, requestId, operationToken) {
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare(CLAIM_AUTHORIZATION_REVIEW_TARGET_SQL).run(
-      requestId, operationToken, now, requestId, reviewerTenantId, commandId, binding
+      requestId, operationToken, now, requestId, reviewerTenantId,
+      reviewerTenantId, commandId, binding
+    );
+    db.prepare(BIND_AUTHORIZATION_REVIEW_COMMAND_SQL).run(
+      reviewerTenantId, commandId, binding, now, requestId, operationToken
+    );
+    const result = db.prepare(APPROVE_AUTHORIZATION_REQUEST_SQL).run(
+      "approved", "admin-actor", commandId, now, now, requestId,
+      "supplier-one", "supplier-tenant", 1,
+      requestId, operationToken, reviewerTenantId, commandId, binding
+    );
+    db.prepare(ACTIVATE_REVIEWED_SUPPLIER_SQL).run(
+      2, now, "supplier-one", "supplier-tenant", 1,
+      requestId, commandId, requestId, operationToken
+    );
+    db.exec("COMMIT");
+    return result.changes;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function approveWithLookupLimit(db, reviewerTenantId, commandId, requestId, operationToken) {
+  const binding = `${requestId}:approve`;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare(claimAuthorizationReviewTargetWithLookupLimitSql(1)).run(
+      requestId, operationToken, now, requestId, reviewerTenantId,
+      now, "legacy-raw-not-used",
+      2, "legacy-commitment-v2", "shared-lookup-digest",
+      MAX_AGENT_AUTHORIZATIONS_PER_TOKEN,
+      reviewerTenantId, commandId, binding
     );
     db.prepare(BIND_AUTHORIZATION_REVIEW_COMMAND_SQL).run(
       reviewerTenantId, commandId, binding, now, requestId, operationToken
@@ -113,6 +197,18 @@ function seedRequest(db, requestId) {
   ).run(requestId);
 }
 
+function seedApprovedCredentialRows(db, count) {
+  const insert = db.prepare(
+    `INSERT INTO authorization_requests (
+      request_id, supplier_id, tenant_id, status, encrypted_gateway_token, gateway_token_iv,
+      valid_until, gateway_token_digest, gateway_token_digest_version,
+      gateway_token_lookup_key_id
+    ) VALUES (?, 'supplier-one', 'supplier-tenant', 'approved', 'ciphertext', 'iv',
+      '2099-01-01T00:00:00.000Z', 'shared-lookup-digest', 2, 'legacy-commitment-v2')`
+  );
+  for (let index = 0; index < count; index += 1) insert.run(`approved-${index}`);
+}
+
 function reviewDatabase() {
   const db = new DatabaseSync(":memory:");
   db.exec(`
@@ -144,7 +240,10 @@ function reviewDatabase() {
       updated_at TEXT,
       encrypted_gateway_token TEXT NOT NULL,
       gateway_token_iv TEXT NOT NULL,
-      gateway_token_digest TEXT
+      valid_until TEXT NOT NULL DEFAULT '2099-01-01T00:00:00.000Z',
+      gateway_token_digest TEXT,
+      gateway_token_digest_version INTEGER NOT NULL DEFAULT 1,
+      gateway_token_lookup_key_id TEXT NOT NULL DEFAULT 'legacy-commitment-v2'
     );
     INSERT INTO suppliers (supplier_id, tenant_id, status, version, updated_at)
       VALUES ('supplier-one', 'supplier-tenant', 'pending', 1, '${now}');

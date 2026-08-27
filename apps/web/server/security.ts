@@ -1,6 +1,15 @@
 import { getChatGPTUser, type ChatGPTUser } from "@/app/chatgpt-auth";
 import { getRuntimeEnv } from "@/db";
 import { ApiError } from "./http";
+import {
+  KeyringConfigurationError,
+  resolveLegacyKeyAliasEnabled,
+  resolveVersionedKeyring,
+  type ResolvedVersionedKeyring
+} from "./keyring";
+
+export const LEGACY_CREDENTIAL_KEY_ID = "legacy-credential-v2";
+export const LEGACY_CREDENTIAL_LOOKUP_KEY_ID = "legacy-commitment-v2";
 
 export interface RequestIdentity {
   user: ChatGPTUser;
@@ -45,25 +54,38 @@ export interface DigestCommitmentContext {
 export async function encryptCredential(
   plaintext: string,
   context: CredentialEncryptionContext
-): Promise<{ ciphertext: string; iv: string; keyVersion: 2 }> {
+): Promise<{ ciphertext: string; iv: string; keyVersion: 2 | 3; keyId: string }> {
   if (plaintext.length < 8 || plaintext.length > 4_096) {
     throw new ApiError("INVALID_REQUEST", "网关令牌长度必须在 8 到 4096 字符之间。", 400);
   }
-  const encrypted = await encryptText(plaintext, await credentialKey(), credentialAdditionalData(context));
-  return { ...encrypted, keyVersion: 2 };
+  const keyring = await credentialKeyring();
+  const keyId = keyring.activeKeyId;
+  const keyVersion = keyId === LEGACY_CREDENTIAL_KEY_ID ? 2 : 3;
+  const encrypted = await encryptText(
+    plaintext,
+    await importAesKey(keyring.keyBytes(keyId)),
+    credentialAdditionalData(context, keyVersion, keyId)
+  );
+  return { ...encrypted, keyVersion, keyId };
 }
 
 export async function decryptCredential(
   ciphertext: string,
   iv: string,
   keyVersion: number,
+  keyId: string,
   context: CredentialEncryptionContext
 ): Promise<string> {
+  const keyring = await credentialKeyring();
+  if (keyVersion === 1 && keyId !== LEGACY_CREDENTIAL_KEY_ID) invalidKeyVersion();
+  if (keyVersion === 2 && keyId !== LEGACY_CREDENTIAL_KEY_ID) invalidKeyVersion();
+  if (keyVersion === 3 && keyId === LEGACY_CREDENTIAL_KEY_ID) invalidKeyVersion();
+  if (keyVersion !== 1 && keyVersion !== 2 && keyVersion !== 3) invalidKeyVersion();
   return decryptText(
     ciphertext,
     iv,
-    await credentialKey(),
-    keyVersion === 1 ? undefined : keyVersion === 2 ? credentialAdditionalData(context) : invalidKeyVersion()
+    await importAesKey(referencedKeyBytes(keyring, keyId)),
+    keyVersion === 1 ? undefined : credentialAdditionalData(context, keyVersion, keyId)
   );
 }
 
@@ -87,7 +109,11 @@ export async function decryptContent(
   return decryptText(
     ciphertext,
     iv,
-    keyVersion === 1 ? await credentialKey() : keyVersion === 2 ? await contentKey() : invalidKeyVersion(),
+    keyVersion === 1
+      ? await importAesKey(referencedKeyBytes(await credentialKeyring(), LEGACY_CREDENTIAL_KEY_ID))
+      : keyVersion === 2
+        ? await contentKey()
+        : invalidKeyVersion(),
     keyVersion === 1 ? undefined : contentAdditionalData(context)
   );
 }
@@ -105,10 +131,33 @@ export async function sha256Bytes(value: ArrayBuffer | ArrayBufferView): Promise
   return bytesToHex(new Uint8Array(digest));
 }
 
-export async function createCredentialLookupDigest(token: string): Promise<{ digest: string; version: 2 }> {
-  const payload = new TextEncoder().encode(`gongsuanyun.credential-lookup.v2\n${token}`);
-  const signature = await crypto.subtle.sign("HMAC", await commitmentKey(), payload);
-  return { digest: bytesToHex(new Uint8Array(signature)), version: 2 };
+export interface CredentialLookupDigest {
+  digest: string;
+  version: 2 | 3;
+  keyId: string;
+}
+
+export async function createCredentialLookupDigest(token: string): Promise<CredentialLookupDigest> {
+  return (await createCredentialLookupDigests(token))[0]!;
+}
+
+export async function createCredentialLookupDigests(token: string): Promise<CredentialLookupDigest[]> {
+  const keyring = await credentialLookupKeyring();
+  return Promise.all(keyring.keyIds.map(async (keyId) => {
+    const version = keyId === LEGACY_CREDENTIAL_LOOKUP_KEY_ID ? 2 : 3;
+    const payload = new TextEncoder().encode(version === 2
+      ? `gongsuanyun.credential-lookup.v2\n${token}`
+      : `gongsuanyun.credential-lookup.v3\n${keyId}\n${token}`);
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyring.keyBytes(keyId),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const signature = await crypto.subtle.sign("HMAC", key, payload);
+    return { digest: bytesToHex(new Uint8Array(signature)), version, keyId };
+  }));
 }
 
 export async function createDigestCommitment(
@@ -129,38 +178,138 @@ export async function createDigestCommitment(
   return { digest: bytesToHex(new Uint8Array(signature)), version: 2 };
 }
 
+export interface RuntimeCryptographicConfiguration {
+  credentialActiveKeyId: string;
+  credentialReadableKeyCount: number;
+  credentialLookupActiveKeyId: string;
+  credentialLookupReadableKeyCount: number;
+  credentialLookupSeparated: boolean;
+}
+
+export interface CredentialKeyringInventory {
+  credentialActiveKeyId: string;
+  credentialKeyIds: readonly string[];
+  credentialLookupActiveKeyId: string;
+  credentialLookupKeyIds: readonly string[];
+}
+
+export async function getCredentialKeyringInventory(): Promise<CredentialKeyringInventory> {
+  const [credentials, lookups] = await Promise.all([
+    credentialKeyring(),
+    credentialLookupKeyring()
+  ]);
+  return {
+    credentialActiveKeyId: credentials.activeKeyId,
+    credentialKeyIds: credentials.keyIds,
+    credentialLookupActiveKeyId: lookups.activeKeyId,
+    credentialLookupKeyIds: lookups.keyIds
+  };
+}
+
+export interface CredentialEncryptionKeyCanary {
+  ciphertext: string;
+  iv: string;
+  formatVersion: 1;
+}
+
+const CREDENTIAL_CANARY_PLAINTEXT = "gongsuanyun.credential-key-canary.v1";
+
+export async function createCredentialEncryptionKeyCanary(
+  keyId: string
+): Promise<CredentialEncryptionKeyCanary> {
+  const keyring = await credentialKeyring();
+  const encrypted = await encryptText(
+    CREDENTIAL_CANARY_PLAINTEXT,
+    await importAesKey(referencedKeyBytes(keyring, keyId)),
+    keyCanaryAdditionalData("credential-encryption", keyId)
+  );
+  return { ...encrypted, formatVersion: 1 };
+}
+
+export async function assertCredentialEncryptionKeyCanary(
+  keyId: string,
+  canary: CredentialEncryptionKeyCanary
+): Promise<void> {
+  if (canary.formatVersion !== 1) invalidRuntimeKeyConfiguration();
+  const keyring = await credentialKeyring();
+  const plaintext = await decryptText(
+    canary.ciphertext,
+    canary.iv,
+    await importAesKey(referencedKeyBytes(keyring, keyId)),
+    keyCanaryAdditionalData("credential-encryption", keyId)
+  );
+  if (plaintext !== CREDENTIAL_CANARY_PLAINTEXT) invalidRuntimeKeyConfiguration();
+}
+
+export async function createCredentialLookupKeyCanary(keyId: string): Promise<string> {
+  const keyring = await credentialLookupKeyring();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    referencedKeyBytes(keyring, keyId),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const payload = new TextEncoder().encode(`gongsuanyun.lookup-key-canary.v1\n${keyId}`);
+  const signature = await crypto.subtle.sign("HMAC", key, payload);
+  return bytesToHex(new Uint8Array(signature));
+}
+
 /**
- * Validates the production key set without exporting key material. This is
- * intentionally part of maintenance so deployment health proves that all
- * encryption domains have independent 256-bit keys before retention mutates
- * customer data.
+ * Validates every readable production key without exporting key material. The
+ * lookup legacy id is the sole deliberate alias: it maps the old lookup HMAC
+ * to the commitment key until rows have lazily migrated to a dedicated ring.
  */
-export async function assertRuntimeCryptographicConfiguration(): Promise<void> {
-  const runtime = getRuntimeEnv();
-  const configured = [
-    runtime.MARKETPLACE_CREDENTIAL_KEY,
-    runtime.MARKETPLACE_CONTENT_KEY,
-    runtime.MARKETPLACE_ARTIFACT_KEY,
-    runtime.MARKETPLACE_COMMITMENT_KEY
+export async function assertRuntimeCryptographicConfiguration(): Promise<RuntimeCryptographicConfiguration> {
+  const [credentials, lookups, contentBytes, artifactBytes, commitmentBytes] = await Promise.all([
+    credentialKeyring(),
+    credentialLookupKeyring(),
+    contentKeyBytes(),
+    artifactKeyBytes(),
+    commitmentKeyBytes()
+  ]);
+  const materials: Array<{ label: string; fingerprint: string }> = [
+    ...credentials.keyIds.map((keyId) => ({
+      label: `credential:${keyId}`,
+      fingerprint: bytesToHex(credentials.keyBytes(keyId))
+    })),
+    ...lookups.keyIds.map((keyId) => ({
+      label: `lookup:${keyId}`,
+      fingerprint: bytesToHex(lookups.keyBytes(keyId))
+    })),
+    { label: "content", fingerprint: bytesToHex(contentBytes) },
+    { label: "artifact", fingerprint: bytesToHex(artifactBytes) },
+    { label: "commitment", fingerprint: bytesToHex(commitmentBytes) }
   ];
-  if (process.env.NODE_ENV === "development" && configured.every((value) => !value)) {
-    await Promise.all([credentialKey(), contentKey(), artifactKey(), commitmentKey()]);
-    return;
+  const byFingerprint = new Map<string, string[]>();
+  for (const material of materials) {
+    const labels = byFingerprint.get(material.fingerprint) ?? [];
+    labels.push(material.label);
+    byFingerprint.set(material.fingerprint, labels);
   }
-  if (configured.some((value) => !value)) invalidRuntimeKeyConfiguration();
-  let fingerprints: string[];
-  try {
-    fingerprints = configured.map((value) => {
-      const bytes = base64ToBytes(value!);
-      if (bytes.byteLength !== 32) invalidRuntimeKeyConfiguration();
-      return bytesToHex(bytes);
-    });
-  } catch (error) {
-    if (error instanceof ApiError) throw error;
-    invalidRuntimeKeyConfiguration();
+  for (const labels of byFingerprint.values()) {
+    if (labels.length === 1) continue;
+    const expectedLegacyAlias = new Set([
+      `lookup:${LEGACY_CREDENTIAL_LOOKUP_KEY_ID}`,
+      "commitment"
+    ]);
+    if (labels.length !== 2 || labels.some((label) => !expectedLegacyAlias.has(label))) {
+      invalidRuntimeKeyConfiguration();
+    }
   }
-  if (new Set(fingerprints).size !== fingerprints.length) invalidRuntimeKeyConfiguration();
-  await Promise.all([credentialKey(), contentKey(), artifactKey(), commitmentKey()]);
+  await Promise.all([
+    importAesKey(credentials.keyBytes(credentials.activeKeyId)),
+    contentKey(),
+    artifactKey(),
+    commitmentKey()
+  ]);
+  return {
+    credentialActiveKeyId: credentials.activeKeyId,
+    credentialReadableKeyCount: credentials.keyIds.length,
+    credentialLookupActiveKeyId: lookups.activeKeyId,
+    credentialLookupReadableKeyCount: lookups.keyIds.length,
+    credentialLookupSeparated: lookups.activeKeyId !== LEGACY_CREDENTIAL_LOOKUP_KEY_ID
+  };
 }
 
 export async function encryptArtifactChunk(
@@ -261,56 +410,128 @@ async function stableId(prefix: string, value: string): Promise<string> {
   return `${prefix}-${(await sha256Hex(value)).slice(0, 32)}`;
 }
 
-async function credentialKey(): Promise<CryptoKey> {
-  let encoded = getRuntimeEnv().MARKETPLACE_CREDENTIAL_KEY;
-  if (!encoded && process.env.NODE_ENV === "development") {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("gongsuanyun-local-development-only"));
-    encoded = bytesToBase64(new Uint8Array(digest));
+async function credentialKeyring(): Promise<ResolvedVersionedKeyring> {
+  const runtime = getRuntimeEnv();
+  try {
+    return resolveVersionedKeyring({
+      serialized: runtime.MARKETPLACE_CREDENTIAL_KEYRING,
+      legacyKey: runtime.MARKETPLACE_CREDENTIAL_KEY,
+      legacyKeyId: LEGACY_CREDENTIAL_KEY_ID,
+      developmentKey: process.env.NODE_ENV === "development"
+        ? await developmentKey("gongsuanyun-local-development-only")
+        : undefined
+    });
+  } catch (error) {
+    if (error instanceof KeyringConfigurationError) invalidRuntimeKeyConfiguration();
+    throw error;
   }
-  if (!encoded) {
-    throw new ApiError("INTERNAL_ERROR", "生产凭据加密密钥尚未配置。", 503);
+}
+
+async function credentialLookupKeyring(): Promise<ResolvedVersionedKeyring> {
+  const runtime = getRuntimeEnv();
+  try {
+    const legacyEnabled = resolveLegacyKeyAliasEnabled(
+      runtime.MARKETPLACE_CREDENTIAL_LOOKUP_LEGACY_ENABLED
+    );
+    return resolveVersionedKeyring({
+      serialized: runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEYRING,
+      legacyKey: legacyEnabled ? runtime.MARKETPLACE_COMMITMENT_KEY : undefined,
+      legacyKeyId: LEGACY_CREDENTIAL_LOOKUP_KEY_ID,
+      developmentKey: legacyEnabled && process.env.NODE_ENV === "development"
+        ? await developmentKey("gongsuanyun-commitment-local-development-only")
+        : undefined
+    });
+  } catch (error) {
+    if (error instanceof KeyringConfigurationError) invalidRuntimeKeyConfiguration();
+    throw error;
   }
-  const bytes = base64ToBytes(encoded);
-  if (bytes.byteLength !== 32) {
-    throw new ApiError("INTERNAL_ERROR", "生产凭据加密密钥格式无效。", 503);
+}
+
+function referencedKeyBytes(
+  keyring: ResolvedVersionedKeyring,
+  keyId: string
+): Uint8Array<ArrayBuffer> {
+  try {
+    return keyring.keyBytes(keyId);
+  } catch (error) {
+    if (error instanceof KeyringConfigurationError) {
+      throw new ApiError("INTERNAL_ERROR", "生产凭据密钥环缺少记录引用的密钥。", 503, true);
+    }
+    throw error;
   }
+}
+
+async function importAesKey(bytes: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
 async function artifactKey(): Promise<CryptoKey> {
-  let encoded = getRuntimeEnv().MARKETPLACE_ARTIFACT_KEY;
-  if (!encoded && process.env.NODE_ENV === "development") {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("gongsuanyun-artifact-local-development-only"));
-    encoded = bytesToBase64(new Uint8Array(digest));
-  }
-  if (!encoded) throw new ApiError("ARTIFACT_STORAGE_UNAVAILABLE", "生产文件加密密钥尚未配置。", 503);
-  const bytes = base64ToBytes(encoded);
-  if (bytes.byteLength !== 32) throw new ApiError("ARTIFACT_STORAGE_UNAVAILABLE", "生产文件加密密钥格式无效。", 503);
-  return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+  return importAesKey(await artifactKeyBytes());
 }
 
 async function contentKey(): Promise<CryptoKey> {
-  let encoded = getRuntimeEnv().MARKETPLACE_CONTENT_KEY;
-  if (!encoded && process.env.NODE_ENV === "development") {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("gongsuanyun-content-local-development-only"));
-    encoded = bytesToBase64(new Uint8Array(digest));
-  }
-  if (!encoded) throw new ApiError("INTERNAL_ERROR", "生产内容加密密钥尚未配置。", 503);
-  const bytes = base64ToBytes(encoded);
-  if (bytes.byteLength !== 32) throw new ApiError("INTERNAL_ERROR", "生产内容加密密钥格式无效。", 503);
-  return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+  return importAesKey(await contentKeyBytes());
 }
 
 async function commitmentKey(): Promise<CryptoKey> {
-  let encoded = getRuntimeEnv().MARKETPLACE_COMMITMENT_KEY;
-  if (!encoded && process.env.NODE_ENV === "development") {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("gongsuanyun-commitment-local-development-only"));
-    encoded = bytesToBase64(new Uint8Array(digest));
+  return crypto.subtle.importKey(
+    "raw",
+    await commitmentKeyBytes(),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+}
+
+async function artifactKeyBytes(): Promise<Uint8Array<ArrayBuffer>> {
+  return singularKeyBytes(
+    getRuntimeEnv().MARKETPLACE_ARTIFACT_KEY,
+    "gongsuanyun-artifact-local-development-only",
+    "ARTIFACT_STORAGE_UNAVAILABLE",
+    "生产文件加密密钥尚未配置或格式无效。"
+  );
+}
+
+async function contentKeyBytes(): Promise<Uint8Array<ArrayBuffer>> {
+  return singularKeyBytes(
+    getRuntimeEnv().MARKETPLACE_CONTENT_KEY,
+    "gongsuanyun-content-local-development-only",
+    "INTERNAL_ERROR",
+    "生产内容加密密钥尚未配置或格式无效。"
+  );
+}
+
+async function commitmentKeyBytes(): Promise<Uint8Array<ArrayBuffer>> {
+  return singularKeyBytes(
+    getRuntimeEnv().MARKETPLACE_COMMITMENT_KEY,
+    "gongsuanyun-commitment-local-development-only",
+    "INTERNAL_ERROR",
+    "生产内容承诺密钥尚未配置或格式无效。"
+  );
+}
+
+async function singularKeyBytes(
+  configured: string | undefined,
+  developmentSeed: string,
+  code: "INTERNAL_ERROR" | "ARTIFACT_STORAGE_UNAVAILABLE",
+  message: string
+): Promise<Uint8Array<ArrayBuffer>> {
+  const encoded = configured ?? (process.env.NODE_ENV === "development"
+    ? await developmentKey(developmentSeed)
+    : undefined);
+  if (!encoded) throw new ApiError(code, message, 503);
+  try {
+    const bytes = base64ToBytes(encoded);
+    if (bytes.byteLength !== 32) throw new Error("invalid key length");
+    return bytes;
+  } catch {
+    throw new ApiError(code, message, 503);
   }
-  if (!encoded) throw new ApiError("INTERNAL_ERROR", "生产内容承诺密钥尚未配置。", 503);
-  const bytes = base64ToBytes(encoded);
-  if (bytes.byteLength !== 32) throw new ApiError("INTERNAL_ERROR", "生产内容承诺密钥格式无效。", 503);
-  return crypto.subtle.importKey("raw", bytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+}
+
+async function developmentKey(seed: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed));
+  return bytesToBase64(new Uint8Array(digest));
 }
 
 async function encryptText(
@@ -345,9 +566,14 @@ async function decryptText(
   }
 }
 
-function credentialAdditionalData(context: CredentialEncryptionContext): ArrayBuffer {
+function credentialAdditionalData(
+  context: CredentialEncryptionContext,
+  keyVersion: 2 | 3,
+  keyId: string
+): ArrayBuffer {
   return new TextEncoder().encode([
-    "gongsuanyun.credential.v2",
+    keyVersion === 2 ? "gongsuanyun.credential.v2" : "gongsuanyun.credential.v3",
+    ...(keyVersion === 3 ? [keyId] : []),
     context.tenantId,
     context.authorizationRequestId
   ].join("\n")).buffer as ArrayBuffer;
@@ -359,6 +585,14 @@ function contentAdditionalData(context: ContentEncryptionContext): ArrayBuffer {
     context.purpose,
     context.tenantId,
     context.resourceId
+  ].join("\n")).buffer as ArrayBuffer;
+}
+
+function keyCanaryAdditionalData(domain: "credential-encryption", keyId: string): ArrayBuffer {
+  return new TextEncoder().encode([
+    "gongsuanyun.key-canary.v1",
+    domain,
+    keyId
   ].join("\n")).buffer as ArrayBuffer;
 }
 

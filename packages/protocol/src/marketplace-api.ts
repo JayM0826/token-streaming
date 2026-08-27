@@ -13,6 +13,7 @@ export const MARKETPLACE_API_VERSION = "v1" as const;
 export type MarketplaceApiErrorCode =
   | "AUTHENTICATION_REQUIRED"
   | "ADMIN_REQUIRED"
+  | "REVIEWER_CONFLICT"
   | "INVALID_REQUEST"
   | "CSRF_REJECTED"
   | "RATE_LIMITED"

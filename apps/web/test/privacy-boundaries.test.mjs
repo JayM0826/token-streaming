@@ -44,6 +44,8 @@ test("replayable content uses a separate key and record-bound authenticated encr
   const security = await source("server/security.ts");
 
   assert.match(security, /MARKETPLACE_CREDENTIAL_KEY/);
+  assert.match(security, /MARKETPLACE_CREDENTIAL_KEYRING/);
+  assert.match(security, /MARKETPLACE_CREDENTIAL_LOOKUP_KEYRING/);
   assert.match(security, /MARKETPLACE_CONTENT_KEY/);
   assert.match(security, /MARKETPLACE_ARTIFACT_KEY/);
   assert.match(security, /MARKETPLACE_COMMITMENT_KEY/);
@@ -103,6 +105,11 @@ test("machine maintenance route uses a separate constant-time bearer boundary", 
   assert.match(maintenance, /maintenance\.authentication/);
   assert.match(maintenance, /cleanupExpiredArtifactData\(now\)/);
   assert.match(maintenance, /assertRuntimeCryptographicConfiguration\(\)/);
+  assert.match(maintenance, /ensureCredentialKeyCanaries\(keyringInventory, now\)/);
+  assert.match(maintenance, /legacyCredentialContentReferences = await assertReferencedCredentialKeysAvailable\([\s\S]*?keyringInventory[\s\S]*?\)/);
+  assert.match(maintenance, /legacyCredentialContentReferences,/);
+  assert.match(maintenance, /rotateCredentialEncryptions/);
+  assert.match(maintenance, /content_key_version = 1/);
   assert.match(maintenance, /artifactDeletionRetentionBreaches/);
   assert.match(maintenance, /unclaimedExpiredArtifacts/);
   assert.match(maintenance, /unclaimedArtifactRetentionBreaches/);
@@ -171,6 +178,7 @@ test("privacy migration upgrades legacy rows without rewriting them", async () =
   const commitmentMigration = await source("drizzle/0005_deep_blade.sql");
   const invariantMigration = await source("drizzle/0006_silky_menace.sql");
   const indexMigration = await source("drizzle/0007_narrow_ezekiel.sql");
+  const keyringMigration = await source("drizzle/0011_fixed_triathlon.sql");
 
   assert.match(migration, /CREATE TABLE `api_rate_limits`/);
   assert.match(migration, /ALTER TABLE `inference_jobs` ADD `privacy_mode` text DEFAULT 'standard' NOT NULL/);
@@ -188,6 +196,10 @@ test("privacy migration upgrades legacy rows without rewriting them", async () =
   assert.doesNotMatch(invariantMigration, /DROP TABLE|DELETE FROM/);
   assert.match(indexMigration, /idx_authorization_requests_credential_status/);
   assert.match(indexMigration, /idx_agent_request_nonces_expires/);
+  assert.match(keyringMigration, /credential_key_id/);
+  assert.match(keyringMigration, /gateway_token_lookup_key_id/);
+  assert.match(keyringMigration, /CREATE TABLE `cryptographic_key_canaries`/);
+  assert.doesNotMatch(keyringMigration, /DROP TABLE|DELETE FROM/);
 });
 
 test("runtime schema bootstrap covers every additive D1 column migration and tolerates isolate races", async () => {
@@ -203,7 +215,7 @@ test("runtime schema bootstrap covers every additive D1 column migration and tol
 
   const runtimeStatements = [...runtimeSchema.matchAll(/sql: ("(?:[^"\\]|\\.)*")/g)]
     .map((match) => normalizeSql(JSON.parse(match[1])));
-  assert.equal(migrationStatements.length, 21);
+  assert.equal(migrationStatements.length, 23);
   assert.deepEqual(new Set(runtimeStatements), new Set(migrationStatements));
   assert.match(runtimeSchema, /if \(await columnExists\(db, migration\.table, migration\.column\)\) continue/);
   assert.match(runtimeSchema, /catch \(error\)[\s\S]*?if \(!await columnExists\(db, migration\.table, migration\.column\)\) throw error/);
@@ -214,13 +226,22 @@ test("gateway, credential, review, upload, and cancellation boundaries fail clos
   const agentAuth = await source("server/agent-auth.ts");
   const artifacts = await source("server/artifact-service.ts");
   const worker = await source("server/artifact-worker-service.ts");
+  const reviewInvariants = await source("server/review-invariants.ts");
 
   assert.match(marketplace, /fetch\(endpoint,[\s\S]*?redirect: "error"/);
   assert.match(marketplace, /review_command_id = \?/);
+  assert.match(marketplace, /request\.tenant_id === identity\.tenantId[\s\S]*?REVIEWER_CONFLICT/);
+  assert.match(marketplace, /WHERE ar\.status = 'pending' AND ar\.tenant_id <> \?/);
   assert.match(marketplace, /guardedReviewEventInsert/);
+  assert.match(reviewInvariants, /request_id = \? AND tenant_id <> \?/);
+  assert.match(reviewInvariants, /MAX_AGENT_AUTHORIZATIONS_PER_TOKEN|authorization_count|SELECT COUNT\(\*\) FROM authorization_requests existing/);
   assert.match(marketplace, /schemaVersion: row\.schema_version/);
   assert.match(agentAuth, /ar\.valid_until > \?/);
-  assert.match(agentAuth, /createCredentialLookupDigest\(gatewayToken\)/);
+  assert.match(agentAuth, /createCredentialLookupDigests\(gatewayToken\)/);
+  assert.match(agentAuth, /gateway_token_lookup_key_id/);
+  assert.match(agentAuth, /MAX_AGENT_AUTHORIZATIONS_PER_TOKEN \+ 1/);
+  assert.doesNotMatch(marketplace, /digest_version \?\? 1\) >= 2/);
+  assert.doesNotMatch(artifacts, /digest_version \?\? 1\) >= 2/);
   assert.match(artifacts, /upload_status = 'pending'/);
   assert.match(artifacts, /upload_status = 'ready'/);
   assert.match(artifacts, /part-.*crypto\.randomUUID\(\)/);
@@ -228,6 +249,8 @@ test("gateway, credential, review, upload, and cancellation boundaries fail clos
   assert.match(artifacts, /artifact-task\.cancel-target/);
   assert.match(worker, /cancellation_requested_at IS NULL/);
   assert.match(worker, /ARTIFACT_TASK_CANCELLED/);
+  assert.match(worker, /a\.tenant_id = t\.buyer_tenant_id/);
+  assert.match(worker, /o\.tenant_id = t\.supplier_tenant_id/);
 });
 
 async function source(relativePath) {

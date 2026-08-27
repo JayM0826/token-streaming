@@ -53,8 +53,10 @@ export const authorizationRequests = sqliteTable(
     gatewayEndpoint: text("gateway_endpoint").notNull(),
     encryptedGatewayToken: text("encrypted_gateway_token").notNull(),
     gatewayTokenIv: text("gateway_token_iv").notNull(),
+    credentialKeyId: text("credential_key_id").notNull().default("legacy-credential-v2"),
     gatewayTokenDigest: text("gateway_token_digest"),
     gatewayTokenDigestVersion: integer("gateway_token_digest_version").notNull().default(1),
+    gatewayTokenLookupKeyId: text("gateway_token_lookup_key_id").notNull().default("legacy-commitment-v2"),
     encryptionKeyVersion: integer("encryption_key_version").notNull().default(1),
     status: text("status").notNull(),
     reviewNote: text("review_note"),
@@ -69,6 +71,13 @@ export const authorizationRequests = sqliteTable(
     index("idx_authorization_requests_status_created").on(table.status, table.createdAt),
     index("idx_authorization_requests_credential_status").on(
       table.gatewayTokenDigestVersion,
+      table.gatewayTokenDigest,
+      table.status,
+      table.validUntil
+    ),
+    index("idx_authorization_requests_lookup_status").on(
+      table.gatewayTokenDigestVersion,
+      table.gatewayTokenLookupKeyId,
       table.gatewayTokenDigest,
       table.status,
       table.validUntil
@@ -290,6 +299,20 @@ export const apiRateLimits = sqliteTable(
     uniqueIndex("idx_api_rate_limits_bucket").on(table.scopeKey, table.action, table.windowStartedAt),
     index("idx_api_rate_limits_expires").on(table.expiresAt)
   ]
+);
+
+export const cryptographicKeyCanaries = sqliteTable(
+  "cryptographic_key_canaries",
+  {
+    canaryId: text("canary_id").primaryKey(),
+    domain: text("domain").notNull(),
+    keyId: text("key_id").notNull(),
+    formatVersion: integer("format_version").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    iv: text("iv"),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [uniqueIndex("idx_cryptographic_key_canaries_domain_key").on(table.domain, table.keyId)]
 );
 
 export const artifacts = sqliteTable(
