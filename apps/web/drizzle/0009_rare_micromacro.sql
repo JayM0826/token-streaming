@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `idx_ledger_entries_job_effect` ON `ledger_entries` (`job_id`,`entry_type`) WHERE "ledger_entries"."job_id" IS NOT NULL AND "ledger_entries"."entry_type" IN ('inference-debit', 'supplier-credit', 'platform-fee');

@@ -44,6 +44,7 @@ export class SupplierArtifactWorker {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly abortController = new AbortController();
+  private readonly pendingTerminalCheckpointDeletes = new Set<string>();
   private loopPromise: Promise<void> | undefined;
   private statusValue: SupplierArtifactWorkerStatus = emptyStatus();
 
@@ -70,6 +71,9 @@ export class SupplierArtifactWorker {
   }
 
   async pollOnce(): Promise<number> {
+    await this.flushTerminalCheckpointDeletes();
+    const cleanup = await this.options.checkpointStore.cleanupExpired();
+    if (cleanup.failed > 0) throw workerError("CHECKPOINT_CLEANUP_FAILED", false);
     const requestId = `artifact-claim-${randomId()}`;
     const body: SupplierArtifactWorkerClaimRequest = {
       protocol_version: SUPPLIER_ARTIFACT_WORKER_PROTOCOL_VERSION,
@@ -121,9 +125,17 @@ export class SupplierArtifactWorker {
       processedBytes: 0,
       lastErrorCode: null
     });
-    const stored = await this.options.checkpointStore.read(assignment.task_id, this.options.gatewayToken);
-    const checkpoint = stored?.completedSegments === assignment.resume_from_segment ? stored : undefined;
+    let completionAccepted = false;
     try {
+      let stored = await this.options.checkpointStore.read(assignment.task_id, this.options.gatewayToken);
+      if (assignment.resume_from_segment === 0 && stored) {
+        await this.options.checkpointStore.delete(assignment.task_id);
+        stored = undefined;
+      }
+      const checkpoint = stored?.completedSegments === assignment.resume_from_segment ? stored : undefined;
+      if (assignment.resume_from_segment > 0 && !checkpoint) {
+        throw workerError("ARTIFACT_CHECKPOINT_REQUIRED", false);
+      }
       const result = await this.options.runtime.executeArtifactTask(
         assignment,
         this.downloadChunks(assignment),
@@ -155,7 +167,8 @@ export class SupplierArtifactWorker {
         execution_evidence_signature: result.executionEvidenceSignature
       };
       await this.signedJson("POST", `/api/v1/agent/artifact-tasks/${encodeURIComponent(assignment.task_id)}/complete`, requestId, body, 512_000);
-      await this.options.checkpointStore.delete(assignment.task_id);
+      completionAccepted = true;
+      await this.deleteTerminalCheckpointOrQueue(assignment.task_id);
       this.setStatus({
         ...this.statusValue,
         state: "polling",
@@ -166,9 +179,27 @@ export class SupplierArtifactWorker {
     } catch (error) {
       const code = errorCode(error);
       const retryable = isRetryable(error);
-      await this.sendFailure(assignment, code, retryable).catch(() => undefined);
-      if (!retryable) await this.options.checkpointStore.delete(assignment.task_id).catch(() => undefined);
+      if (!completionAccepted) {
+        await this.sendFailure(assignment, code, retryable).catch(() => undefined);
+        if (!retryable) await this.deleteTerminalCheckpointOrQueue(assignment.task_id);
+      }
       this.setStatus({ ...this.statusValue, state: "error", taskId: null, lastErrorCode: code });
+      throw error;
+    }
+  }
+
+  private async flushTerminalCheckpointDeletes(): Promise<void> {
+    for (const taskId of [...this.pendingTerminalCheckpointDeletes]) {
+      await this.deleteTerminalCheckpointOrQueue(taskId);
+    }
+  }
+
+  private async deleteTerminalCheckpointOrQueue(taskId: string): Promise<void> {
+    try {
+      await this.options.checkpointStore.delete(taskId);
+      this.pendingTerminalCheckpointDeletes.delete(taskId);
+    } catch (error) {
+      this.pendingTerminalCheckpointDeletes.add(taskId);
       throw error;
     }
   }

@@ -13,7 +13,8 @@ RUN corepack pnpm@9.15.0 --filter @token-streaming/supplier-node deploy --prod /
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-RUN addgroup -S -g 10001 supplier && adduser -S -D -H -u 10001 -G supplier supplier
+RUN addgroup -S -g 10001 supplier && adduser -S -D -H -u 10001 -G supplier supplier \
+  && mkdir -p /var/lib/gongsuanyun && chown supplier:supplier /var/lib/gongsuanyun
 COPY --from=build --chown=supplier:supplier /release ./
 USER supplier
 EXPOSE 8789

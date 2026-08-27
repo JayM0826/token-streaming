@@ -6,6 +6,7 @@ import {
   ARTIFACT_SUPPORTED_MEDIA_TYPES,
   type ArtifactChunkDescriptor,
   type ArtifactSupportedMediaType,
+  type CancelArtifactTaskResponse,
   type CreateArtifactTaskResponse,
   type CreateArtifactUploadResponse,
   type MarketplaceApiErrorBody,
@@ -57,9 +58,17 @@ const EMPTY_UPLOAD: UploadState = {
 
 export function ArtifactTaskPanel({ snapshot, onSnapshot, onNotice, onPurge }: ArtifactTaskPanelProps) {
   const [upload, setUpload] = useState<UploadState>(EMPTY_UPLOAD);
+  const [selectedArtifactId, setSelectedArtifactId] = useState("");
   const refreshInFlight = useRef(false);
   const models = [...new Set(snapshot.marketOffers.filter((offer) => !offer.mine).map((offer) => offer.model))];
-  const active = snapshot.artifactTasks.some((task) => ["queued", "claimed", "running"].includes(task.status));
+  const active = snapshot.artifactTasks.some((task) => ["queued", "claimed", "running", "cancelling"].includes(task.status));
+  const reusableArtifacts = snapshot.artifacts.filter((artifact) =>
+    artifact.status === "ready" &&
+    artifact.privacyMode === "standard" &&
+    artifact.contentPurgedAt === null &&
+    artifact.expiresAt > snapshot.generatedAt
+  );
+  const selectedArtifact = reusableArtifacts.find((artifact) => artifact.artifactId === selectedArtifactId) ?? null;
 
   useEffect(() => {
     if (!active) return;
@@ -84,84 +93,98 @@ export function ArtifactTaskPanel({ snapshot, onSnapshot, onNotice, onPurge }: A
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const file = form.get("artifact");
-    if (!(file instanceof File) || file.size < 1) {
-      onNotice("请选择一个非空文件");
-      return;
-    }
-    if (file.size > ARTIFACT_MAX_SIZE_BYTES) {
-      onNotice("文件超过 256 MiB 上限");
-      return;
-    }
-    const mediaType = resolveMediaType(file);
-    if (!mediaType) {
-      onNotice("当前只支持 UTF-8 文本、Markdown、CSV、JSON、NDJSON 与 XML");
-      return;
-    }
-    const privacyMode = String(form.get("privacyMode")) as MarketplacePrivacyMode;
-    if (privacyMode !== "standard" && privacyMode !== "strict") {
-      onNotice("隐私留存模式无效");
-      return;
-    }
-    const chunkCount = Math.ceil(file.size / ARTIFACT_CHUNK_SIZE_BYTES);
-    setUpload({ phase: "hashing", fileName: file.name, uploadedBytes: 0, totalBytes: file.size, partNumber: 0, chunkCount });
     try {
-      let resume = readResumeState(file, mediaType, privacyMode);
-      if (!resume) {
-        const created = await requestJson<CreateArtifactUploadResponse>("/api/v1/artifacts", {
+      let artifactId: string;
+      if (selectedArtifact) {
+        artifactId = selectedArtifact.artifactId;
+        setUpload({
+          phase: "queuing",
+          fileName: selectedArtifact.fileName,
+          uploadedBytes: selectedArtifact.sizeBytes,
+          totalBytes: selectedArtifact.sizeBytes,
+          partNumber: selectedArtifact.chunkCount,
+          chunkCount: selectedArtifact.chunkCount
+        });
+      } else {
+        if (!(file instanceof File) || file.size < 1) {
+          onNotice("请选择一个非空文件，或复用一个仍在留存期内的文件");
+          return;
+        }
+        if (file.size > ARTIFACT_MAX_SIZE_BYTES) {
+          onNotice("文件超过 256 MiB 上限");
+          return;
+        }
+        const mediaType = resolveMediaType(file);
+        if (!mediaType) {
+          onNotice("当前只支持 UTF-8 文本、Markdown、CSV、JSON、NDJSON 与 XML");
+          return;
+        }
+        const privacyMode = String(form.get("privacyMode")) as MarketplacePrivacyMode;
+        if (privacyMode !== "standard" && privacyMode !== "strict") {
+          onNotice("隐私留存模式无效");
+          return;
+        }
+        const chunkCount = Math.ceil(file.size / ARTIFACT_CHUNK_SIZE_BYTES);
+        setUpload({ phase: "hashing", fileName: file.name, uploadedBytes: 0, totalBytes: file.size, partNumber: 0, chunkCount });
+        let resume = readResumeState(file, mediaType, privacyMode);
+        if (!resume) {
+          const created = await requestJson<CreateArtifactUploadResponse>("/api/v1/artifacts", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              fileName: privacyMode === "strict" ? null : file.name,
+              mediaType,
+              sizeBytes: file.size,
+              privacyMode
+            })
+          });
+          resume = {
+            version: 3,
+            artifactId: created.artifact.artifactId,
+            fileName: privacyMode === "strict" ? null : file.name,
+            sizeBytes: file.size,
+            lastModified: file.lastModified,
+            mediaType,
+            privacyMode,
+            parts: []
+          };
+          writeResumeState(resume);
+        } else {
+          onNotice(`已恢复 ${resume.parts.length}/${chunkCount} 个完成分块，正在重新校验本地文件`);
+        }
+        const parts: ArtifactChunkDescriptor[] = [...resume.parts];
+        for (let index = 0; index < chunkCount; index += 1) {
+          const partNumber = index + 1;
+          const start = index * ARTIFACT_CHUNK_SIZE_BYTES;
+          const end = Math.min(file.size, start + ARTIFACT_CHUNK_SIZE_BYTES);
+          const chunk = file.slice(start, end);
+          setUpload((state) => ({ ...state, phase: "hashing", partNumber }));
+          const sha256 = await digestBlob(chunk);
+          const completed = parts.find((part) => part.partNumber === partNumber);
+          if (completed) {
+            if (completed.sizeBytes !== chunk.size || completed.sha256 !== sha256) {
+              clearResumeState();
+              throw new Error("本地文件内容与断点记录不一致，已清除旧记录，请重新提交");
+            }
+            setUpload((state) => ({ ...state, uploadedBytes: end }));
+            continue;
+          }
+          setUpload((state) => ({ ...state, phase: "uploading", partNumber }));
+          await uploadChunk(resume.artifactId, partNumber, chunk, sha256);
+          parts.push({ partNumber, sizeBytes: chunk.size, sha256 });
+          parts.sort((left, right) => left.partNumber - right.partNumber);
+          resume.parts = [...parts];
+          writeResumeState(resume);
+          setUpload((state) => ({ ...state, uploadedBytes: end }));
+        }
+        await requestJson(`/api/v1/artifacts/${encodeURIComponent(resume.artifactId)}/complete`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            fileName: privacyMode === "strict" ? null : file.name,
-            mediaType,
-            sizeBytes: file.size,
-            privacyMode
-          })
+          body: JSON.stringify({ parts })
         });
-        resume = {
-          version: 3,
-          artifactId: created.artifact.artifactId,
-          fileName: privacyMode === "strict" ? null : file.name,
-          sizeBytes: file.size,
-          lastModified: file.lastModified,
-          mediaType,
-          privacyMode,
-          parts: []
-        };
-        writeResumeState(resume);
-      } else {
-        onNotice(`已恢复 ${resume.parts.length}/${chunkCount} 个完成分块，正在重新校验本地文件`);
+        artifactId = resume.artifactId;
+        setUpload((state) => ({ ...state, phase: "queuing" }));
       }
-      const parts: ArtifactChunkDescriptor[] = [...resume.parts];
-      for (let index = 0; index < chunkCount; index += 1) {
-        const partNumber = index + 1;
-        const start = index * ARTIFACT_CHUNK_SIZE_BYTES;
-        const end = Math.min(file.size, start + ARTIFACT_CHUNK_SIZE_BYTES);
-        const chunk = file.slice(start, end);
-        setUpload((state) => ({ ...state, phase: "hashing", partNumber }));
-        const sha256 = await digestBlob(chunk);
-        const completed = parts.find((part) => part.partNumber === partNumber);
-        if (completed) {
-          if (completed.sizeBytes !== chunk.size || completed.sha256 !== sha256) {
-            clearResumeState();
-            throw new Error("本地文件内容与断点记录不一致，已清除旧记录，请重新提交");
-          }
-          setUpload((state) => ({ ...state, uploadedBytes: end }));
-          continue;
-        }
-        setUpload((state) => ({ ...state, phase: "uploading", partNumber }));
-        await uploadChunk(resume.artifactId, partNumber, chunk, sha256);
-        parts.push({ partNumber, sizeBytes: chunk.size, sha256 });
-        parts.sort((left, right) => left.partNumber - right.partNumber);
-        resume.parts = [...parts];
-        writeResumeState(resume);
-        setUpload((state) => ({ ...state, uploadedBytes: end }));
-      }
-      await requestJson(`/api/v1/artifacts/${encodeURIComponent(resume.artifactId)}/complete`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ parts })
-      });
-      setUpload((state) => ({ ...state, phase: "queuing" }));
       const task = await requestJson<CreateArtifactTaskResponse>("/api/v1/artifact-tasks", {
         method: "POST",
         headers: {
@@ -169,7 +192,7 @@ export function ArtifactTaskPanel({ snapshot, onSnapshot, onNotice, onPurge }: A
           "idempotency-key": `artifact-task-${crypto.randomUUID()}`
         },
         body: JSON.stringify({
-          artifactId: resume.artifactId,
+          artifactId,
           model: String(form.get("model")),
           instruction: String(form.get("instruction")),
           dataClass: String(form.get("dataClass")),
@@ -178,14 +201,34 @@ export function ArtifactTaskPanel({ snapshot, onSnapshot, onNotice, onPurge }: A
           supplierProcessingAcknowledged: form.get("supplierProcessingAcknowledged") === "on"
         })
       });
-      clearResumeState();
+      if (!selectedArtifact) clearResumeState();
       onSnapshot(await readDashboard());
       formElement.reset();
+      setSelectedArtifactId("");
       onNotice(`文件任务已进入队列 · ${task.task.taskId.slice(0, 24)} · 完成凭证验证后才扣费`);
     } catch (error) {
       onNotice(error instanceof Error ? error.message : "文件任务提交失败");
     } finally {
       setUpload(EMPTY_UPLOAD);
+    }
+  }
+
+  async function cancelTask(taskId: string) {
+    try {
+      const result = await requestJson<CancelArtifactTaskResponse>(
+        `/api/v1/artifact-tasks/${encodeURIComponent(taskId)}/cancel`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ commandId: `artifact-cancel-${crypto.randomUUID()}` })
+        }
+      );
+      onSnapshot(await readDashboard());
+      onNotice(result.status === "cancelled"
+        ? `任务已取消，已释放预留 ${formatMicros(result.releasedReservationMicros)}`
+        : "已请求取消；平台正等待供应节点确认，确认前继续保留费用预留");
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "取消文件任务失败");
     }
   }
 
@@ -195,9 +238,10 @@ export function ArtifactTaskPanel({ snapshot, onSnapshot, onNotice, onPurge }: A
       <div className="panel-heading"><div><span className="section-kicker">RESUMABLE ARTIFACT JOB</span><h3>提交大文件异步任务</h3></div><span className="health-pill">最大 256 MiB</span></div>
       <p className="artifact-intro">浏览器按 4 MiB 分块计算 SHA-256 后上传；平台分块加密保存，供应 Agent 主动领取、分段处理并持续回报检查点。</p>
       <form className="inference-form artifact-form" onSubmit={submit}>
-        <label>文件<input name="artifact" type="file" required accept=".txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.ndjson,.xml,text/plain,text/markdown,text/csv,text/tab-separated-values,application/json,application/x-ndjson,application/xml,text/xml" /></label>
+        {reusableArtifacts.length > 0 && <label>复用已上传文件<select value={selectedArtifact?.artifactId ?? ""} onChange={(event) => setSelectedArtifactId(event.currentTarget.value)}><option value="">不复用，上传新文件</option>{reusableArtifacts.map((artifact) => <option key={artifact.artifactId} value={artifact.artifactId}>{artifact.fileName} · {formatBytes(artifact.sizeBytes)} · 至 {formatDate(artifact.expiresAt)}</option>)}</select><small>仅列出标准留存、内容完整且尚未到期的文件；严格模式文件不会用于复用。</small></label>}
+        <label>文件<input name="artifact" type="file" required={!selectedArtifact} disabled={selectedArtifact !== null} accept=".txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.ndjson,.xml,text/plain,text/markdown,text/csv,text/tab-separated-values,application/json,application/x-ndjson,application/xml,text/xml" /></label>
         <div className="form-grid"><label>精确模型<select name="model" disabled={models.length === 0}>{models.length ? models.map((model) => <option key={model}>{model}</option>) : <option>暂无支持文件任务的在线供给</option>}</select></label><label>数据等级<select name="dataClass" defaultValue="P0"><option value="P0">P0 · 公开数据</option><option value="P1">P1 · 一般业务数据</option></select></label></div>
-        <label>隐私留存<select name="privacyMode" defaultValue="strict"><option value="strict">严格 · 隐藏原文件名，任务结束清除输入</option><option value="standard">标准 · 输入最多保留 48 小时</option></select></label>
+        <label>隐私留存<select name="privacyMode" defaultValue="strict" disabled={selectedArtifact !== null}><option value="strict">严格 · 隐藏原文件名，任务结束清除输入</option><option value="standard">标准 · 输入最多保留 48 小时</option></select>{selectedArtifact && <small>复用文件沿用原有“标准”留存策略与原到期时间。</small>}</label>
         <label>处理要求<textarea name="instruction" required maxLength={8000} defaultValue="阅读全部文件，提取关键事实，标出不确定项，并给出结构化中文总结。" /></label>
         <div className="form-grid"><label>最终输出 token 上限<input name="maxOutputTokens" type="number" min="1" max="32768" defaultValue="4096" required /></label><label>全任务 token 预算<input name="maxTotalTokens" type="number" min="4096" max="10000000" defaultValue="200000" required /></label></div>
         {upload.phase !== "idle" && <div className="artifact-upload-progress" role="status" aria-live="polite"><div><b>{phaseLabel(upload.phase)}</b><span>{upload.fileName} · 分块 {upload.partNumber}/{upload.chunkCount}</span></div><progress max="100" value={percent} /><small>{formatBytes(upload.uploadedBytes)} / {formatBytes(upload.totalBytes)} · {percent}%</small></div>}
@@ -207,15 +251,16 @@ export function ArtifactTaskPanel({ snapshot, onSnapshot, onNotice, onPurge }: A
         <button className="primary-button full" disabled={upload.phase !== "idle" || models.length === 0}>{upload.phase === "idle" ? "加密上传并排队" : phaseLabel(upload.phase)}</button>
       </form>
     </section>
-    <ArtifactTaskTable snapshot={snapshot} onPurge={onPurge} />
+    <ArtifactTaskTable snapshot={snapshot} onPurge={onPurge} onCancel={cancelTask} />
   </>;
 }
 
-function ArtifactTaskTable({ snapshot, onPurge }: {
+function ArtifactTaskTable({ snapshot, onPurge, onCancel }: {
   snapshot: MarketplaceDashboardSnapshot;
   onPurge: (resourceType: PurgeableMarketplaceResource, resourceId: string) => Promise<void>;
+  onCancel: (taskId: string) => Promise<void>;
 }) {
-  return <article className="panel table-panel artifact-task-table"><div className="panel-heading"><div><span className="section-kicker">ASYNC TASKS</span><h3>文件任务与执行凭证</h3></div><span className="health-pill">{snapshot.artifactTasks.length} 个任务</span></div><div className="table-scroll"><table><thead><tr><th>文件 / 模型</th><th>状态</th><th>进度</th><th>用量 / 实扣</th><th>结果或错误</th><th>隐私</th></tr></thead><tbody>{snapshot.artifactTasks.map((task) => <tr key={task.taskId}><td><b>{task.fileName}</b><small className="cell-sub">{task.model} · {formatDate(task.createdAt)}</small></td><td><span className={`status-pill ${task.status === "completed" ? "live" : task.status === "failed" || task.status === "cancelled" ? "danger" : "review"}`}>{taskStatusLabel(task.status)}</span><small className="cell-sub">第 {task.progress.attempt} 次执行</small></td><td><b>{progressPercent(task)}%</b><small className="cell-sub">{task.progress.completedSegments}/{task.progress.totalSegments ?? "—"} 段 · {formatBytes(task.progress.processedBytes)}</small></td><td>{task.totalTokens === null ? "—" : `${task.totalTokens.toLocaleString()} tokens`}<small className="cell-sub">{task.chargeMicros === null ? "完成后结算" : formatMicros(task.chargeMicros)}</small></td><td>{task.output ? <details><summary>查看结果</summary><pre>{task.output}</pre>{task.evidenceDigest && <code title={task.evidenceDigest}>{shortDigest(task.evidenceDigest)}</code>}</details> : <span>{task.contentPurgedAt ? "内容已清除" : task.errorCode ?? (task.status === "queued" ? "等待已授权 Agent" : "处理中…")}</span>}</td><td><span className="scope-pill">{task.privacyMode === "strict" ? "严格" : "标准"}</span>{task.contentPurgedAt ? <small className="cell-sub">已清除</small> : <button className="table-action danger" onClick={() => void onPurge("artifact-task", task.taskId)}>清除内容</button>}</td></tr>)}{snapshot.artifactTasks.length === 0 && <tr><td colSpan={6}><div className="empty-row">尚未提交文件任务</div></td></tr>}</tbody></table></div></article>;
+  return <article className="panel table-panel artifact-task-table"><div className="panel-heading"><div><span className="section-kicker">ASYNC TASKS</span><h3>文件任务与执行凭证</h3></div><span className="health-pill">{snapshot.artifactTasks.length} 个任务</span></div><div className="table-scroll"><table><thead><tr><th>文件 / 模型</th><th>状态</th><th>进度</th><th>用量 / 实扣</th><th>结果或错误</th><th>隐私 / 操作</th></tr></thead><tbody>{snapshot.artifactTasks.map((task) => <tr key={task.taskId}><td><b>{task.fileName}</b><small className="cell-sub">{task.model} · {formatDate(task.createdAt)}</small></td><td><span className={`status-pill ${task.status === "completed" ? "live" : task.status === "failed" || task.status === "cancelled" ? "danger" : "review"}`}>{taskStatusLabel(task.status)}</span><small className="cell-sub">第 {task.progress.attempt} 次执行</small></td><td><b>{progressPercent(task)}%</b><small className="cell-sub">{task.progress.completedSegments}/{task.progress.totalSegments ?? "—"} 段 · {formatBytes(task.progress.processedBytes)}</small></td><td>{task.totalTokens === null ? "—" : `${task.totalTokens.toLocaleString()} tokens`}<small className="cell-sub">{task.chargeMicros === null ? task.status === "cancelling" ? "预留仍保留" : "完成后结算" : formatMicros(task.chargeMicros)}</small></td><td>{task.output ? <details><summary>查看结果</summary><pre>{task.output}</pre>{task.evidenceDigest && <code title={task.evidenceDigest}>{shortDigest(task.evidenceDigest)}</code>}</details> : <span>{task.contentPurgedAt ? "内容已清除" : task.status === "completed" && task.contentExpiresAt === null ? "任务输出已清除；文件仍按策略保留" : task.errorCode ?? (task.status === "queued" ? "等待已授权 Agent" : task.status === "cancelling" ? "等待节点确认取消" : "处理中…")}</span>}</td><td><span className="scope-pill">{task.privacyMode === "strict" ? "严格" : "标准"}</span>{["queued", "claimed", "running"].includes(task.status) && <button className="table-action" onClick={() => void onCancel(task.taskId)}>{task.privacyMode === "strict" ? "取消并安排清除" : "取消并保留文件"}</button>}{task.status === "cancelling" && <small className="cell-sub">取消确认中</small>}{task.contentPurgedAt ? <small className="cell-sub">已清除</small> : ["claimed", "running", "cancelling"].includes(task.status) ? <small className="cell-sub">取消确认后可清除</small> : <button className="table-action danger" onClick={() => void onPurge("artifact-task", task.taskId)}>清除内容</button>}</td></tr>)}{snapshot.artifactTasks.length === 0 && <tr><td colSpan={6}><div className="empty-row">尚未提交文件任务</div></td></tr>}</tbody></table></div></article>;
 }
 
 async function uploadChunk(artifactId: string, partNumber: number, chunk: Blob, sha256: string): Promise<void> {
@@ -316,7 +361,7 @@ function phaseLabel(phase: UploadState["phase"]): string {
 }
 
 function taskStatusLabel(status: string): string {
-  return ({ queued: "排队中", claimed: "已领取", running: "处理中", completed: "已完成", failed: "失败", cancelled: "已取消" } as Record<string, string>)[status] ?? status;
+  return ({ queued: "排队中", claimed: "已领取", running: "处理中", cancelling: "取消确认中", completed: "已完成", failed: "失败", cancelled: "已取消" } as Record<string, string>)[status] ?? status;
 }
 
 function formatBytes(value: number): string {

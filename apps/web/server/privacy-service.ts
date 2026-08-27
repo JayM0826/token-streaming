@@ -6,14 +6,28 @@ import type {
 
 import { ensureSchema, getArtifactBucket, getD1 } from "@/db";
 import { ApiError } from "./http";
+import {
+  CLAIM_ARTIFACT_PURGE_SQL,
+  DELETE_ARTIFACT_CHUNK_GENERATION_SQL,
+  FINALIZE_ARTIFACT_PURGE_SQL,
+  SELECT_ARTIFACT_PURGE_GENERATIONS_SQL,
+  TOMBSTONE_ARTIFACT_CHUNK_GENERATION_SQL,
+  enqueueArtifactObjectDeletion
+} from "./artifact-storage-invariants";
 import { enforceTenantRateLimit } from "./rate-limit";
 import type { RequestIdentity } from "./security";
+import {
+  CANCEL_QUEUED_ARTIFACT_TASK_FOR_PURGE_SQL,
+  IDEMPOTENT_CONTENT_PURGE_AUDIT_SQL,
+  SELECT_ARTIFACT_TASK_PURGE_STATE_SQL
+} from "./privacy-invariants";
 
 interface PurgeRow {
   resource_id: string;
   artifact_id?: string;
   status: string;
   content_purged_at: string | null;
+  full_content_purged_at?: string | null;
 }
 
 export async function purgeMarketplaceContent(
@@ -64,7 +78,16 @@ async function purgeArtifact(identity: RequestIdentity, artifactId: string): Pro
      FROM artifacts WHERE artifact_id = ? AND tenant_id = ?`
   ).bind(artifactId, identity.tenantId).first<PurgeRow>();
   if (!row) notFound();
-  if (row.content_purged_at) return row.content_purged_at;
+  if (row.content_purged_at && row.status === "deleted") {
+    await idempotentAuditInsert(
+      identity,
+      "privacy.artifact-content-purged",
+      "artifact",
+      artifactId,
+      row.content_purged_at
+    ).run();
+    return row.content_purged_at;
+  }
   const active = await db.prepare(
     `SELECT COUNT(*) AS count FROM artifact_tasks
      WHERE artifact_id = ? AND buyer_tenant_id = ? AND status IN ('queued', 'claimed', 'running')`
@@ -77,12 +100,36 @@ async function purgeArtifact(identity: RequestIdentity, artifactId: string): Pro
 
 async function purgeArtifactTask(identity: RequestIdentity, taskId: string): Promise<string> {
   const db = getD1();
-  const row = await db.prepare(
-    `SELECT task_id AS resource_id, artifact_id, status, content_purged_at
-     FROM artifact_tasks WHERE task_id = ? AND buyer_tenant_id = ?`
-  ).bind(taskId, identity.tenantId).first<PurgeRow>();
+  const row = await db.prepare(SELECT_ARTIFACT_TASK_PURGE_STATE_SQL)
+    .bind(taskId, identity.tenantId).first<PurgeRow>();
   if (!row?.artifact_id) notFound();
-  if (row.content_purged_at) return row.content_purged_at;
+  if (row.full_content_purged_at) {
+    await db.batch([
+      idempotentAuditInsert(
+        identity,
+        "privacy.artifact-content-purged",
+        "artifact",
+        row.artifact_id,
+        row.full_content_purged_at
+      ),
+      idempotentAuditInsert(
+        identity,
+        "privacy.artifact-task-content-purged",
+        "artifact-task",
+        taskId,
+        row.full_content_purged_at
+      )
+    ]);
+    return row.full_content_purged_at;
+  }
+  if (row.status === "claimed" || row.status === "running") {
+    throw new ApiError(
+      "CONFLICT",
+      "任务已由供应节点领取；请先取消并等待节点确认或租约到期后再清除内容。",
+      409,
+      true
+    );
+  }
   const otherActive = await db.prepare(
     `SELECT COUNT(*) AS count FROM artifact_tasks
      WHERE artifact_id = ? AND buyer_tenant_id = ? AND task_id <> ?
@@ -92,21 +139,39 @@ async function purgeArtifactTask(identity: RequestIdentity, taskId: string): Pro
     throw new ApiError("CONFLICT", "同一文件仍被其他任务使用，暂时不能物理清除。", 409, true);
   }
   const now = new Date().toISOString();
-  await db.batch([
-    db.prepare(
-      `UPDATE artifact_tasks SET
-         status = CASE WHEN status IN ('queued', 'claimed', 'running') THEN 'cancelled' ELSE status END,
-         instruction_ciphertext = '', instruction_iv = '', output_ciphertext = NULL,
-         output_iv = NULL, output_expires_at = NULL, lease_digest = NULL, lease_expires_at = NULL,
-         error_code = CASE WHEN status IN ('queued', 'claimed', 'running') THEN 'USER_CONTENT_PURGED' ELSE error_code END,
-         completed_at = CASE WHEN status IN ('queued', 'claimed', 'running') THEN ? ELSE completed_at END,
-         updated_at = ?
-       WHERE task_id = ? AND buyer_tenant_id = ?`
-    ).bind(now, now, taskId, identity.tenantId),
-    db.prepare(
-      "UPDATE artifacts SET expires_at = ?, updated_at = ? WHERE artifact_id = ? AND tenant_id = ?"
-    ).bind(now, now, row.artifact_id, identity.tenantId)
-  ]);
+  if (row.status === "queued") {
+    const prepared = await db.batch([
+      db.prepare(CANCEL_QUEUED_ARTIFACT_TASK_FOR_PURGE_SQL)
+        .bind(now, now, now, taskId, identity.tenantId),
+      db.prepare(
+        `UPDATE artifacts SET expires_at = ?, updated_at = ?
+         WHERE artifact_id = ? AND tenant_id = ? AND EXISTS (
+           SELECT 1 FROM artifact_tasks WHERE task_id = ? AND buyer_tenant_id = ?
+             AND status = 'cancelled' AND error_code = 'USER_CONTENT_PURGED'
+         )`
+      ).bind(now, now, row.artifact_id, identity.tenantId, taskId, identity.tenantId)
+    ]);
+    if ((prepared[0]?.meta.changes ?? 0) !== 1) {
+      throw new ApiError(
+        "CONFLICT",
+        "任务状态已变化；如任务已被领取，请先完成两阶段取消。",
+        409,
+        true
+      );
+    }
+  } else {
+    await db.batch([
+      db.prepare(
+        `UPDATE artifact_tasks SET instruction_ciphertext = '', instruction_iv = '',
+           output_ciphertext = NULL, output_iv = NULL, output_expires_at = NULL, updated_at = ?
+         WHERE task_id = ? AND buyer_tenant_id = ?
+           AND status IN ('completed', 'failed', 'cancelled')`
+      ).bind(now, taskId, identity.tenantId),
+      db.prepare(
+        "UPDATE artifacts SET expires_at = ?, updated_at = ? WHERE artifact_id = ? AND tenant_id = ?"
+      ).bind(now, now, row.artifact_id, identity.tenantId)
+    ]);
+  }
   return deleteArtifactBytes(identity, row.artifact_id, taskId);
 }
 
@@ -116,9 +181,37 @@ async function deleteArtifactBytes(
   taskId: string | undefined
 ): Promise<string> {
   const db = getD1();
-  const chunks = await db.prepare(
-    "SELECT storage_key FROM artifact_chunks WHERE artifact_id = ? AND tenant_id = ? ORDER BY part_number"
-  ).bind(artifactId, identity.tenantId).all<{ storage_key: string }>();
+  const tombstonedAt = new Date().toISOString();
+  const claimed = await db.prepare(CLAIM_ARTIFACT_PURGE_SQL)
+    .bind(tombstonedAt, tombstonedAt, tombstonedAt, artifactId, identity.tenantId).run();
+  if ((claimed.meta.changes ?? 0) !== 1) {
+    throw new ApiError(
+      "CONFLICT",
+      "文件刚被新的任务使用，未执行物理清除；请先取消所有活跃任务。",
+      409,
+      true
+    );
+  }
+  const chunks = await db.prepare(SELECT_ARTIFACT_PURGE_GENERATIONS_SQL)
+    .bind(artifactId, identity.tenantId).all<{
+    part_number: number;
+    storage_key: string;
+    uploaded_at: string;
+  }>();
+  if (chunks.results.length > 0) {
+    const retainUntil = new Date(Date.parse(tombstonedAt) + 24 * 60 * 60_000).toISOString();
+    await db.batch(chunks.results.flatMap((chunk) => [
+      enqueueArtifactObjectDeletion(db, {
+        artifactId,
+        tenantId: identity.tenantId,
+        storageKey: chunk.storage_key
+      }, tombstonedAt, tombstonedAt, retainUntil),
+      db.prepare(TOMBSTONE_ARTIFACT_CHUNK_GENERATION_SQL).bind(
+        artifactId, identity.tenantId, chunk.part_number,
+        chunk.storage_key, chunk.uploaded_at
+      )
+    ]));
+  }
   try {
     if (chunks.results.length > 0) {
       await getArtifactBucket().delete(chunks.results.map((chunk) => chunk.storage_key));
@@ -127,15 +220,30 @@ async function deleteArtifactBytes(
     throw new ApiError("ARTIFACT_STORAGE_UNAVAILABLE", "加密文件正在等待物理清除，请稍后重试。", 503, true);
   }
   const now = new Date().toISOString();
+  await db.batch([
+    ...chunks.results.map((chunk) => db.prepare(DELETE_ARTIFACT_CHUNK_GENERATION_SQL)
+      .bind(artifactId, identity.tenantId, chunk.part_number, chunk.storage_key, chunk.uploaded_at)),
+    db.prepare(FINALIZE_ARTIFACT_PURGE_SQL).bind(now, now, artifactId, identity.tenantId)
+  ]);
+  const final = await db.prepare(
+    "SELECT status, content_purged_at FROM artifacts WHERE artifact_id = ? AND tenant_id = ?"
+  ).bind(artifactId, identity.tenantId).first<{ status: string; content_purged_at: string | null }>();
+  if (final?.status !== "deleted") {
+    throw new ApiError(
+      "ARTIFACT_STORAGE_UNAVAILABLE",
+      "加密文件正在有界分批物理清除，请稍后重试。",
+      503,
+      true
+    );
+  }
   const statements: D1PreparedStatement[] = [
-    db.prepare("DELETE FROM artifact_chunks WHERE artifact_id = ? AND tenant_id = ?")
-      .bind(artifactId, identity.tenantId),
-    db.prepare(
-      `UPDATE artifacts SET status = 'deleted', file_name = 'deleted-artifact', manifest_sha256 = NULL,
-         content_purged_at = COALESCE(content_purged_at, ?), updated_at = ?
-       WHERE artifact_id = ? AND tenant_id = ?`
-    ).bind(now, now, artifactId, identity.tenantId),
-    auditInsert(identity, "privacy.artifact-content-purged", "artifact", artifactId, now)
+    idempotentAuditInsert(
+      identity,
+      "privacy.artifact-content-purged",
+      "artifact",
+      artifactId,
+      final.content_purged_at ?? now
+    )
   ];
   if (taskId) {
     statements.push(
@@ -143,11 +251,39 @@ async function deleteArtifactBytes(
         `UPDATE artifact_tasks SET content_purged_at = COALESCE(content_purged_at, ?), updated_at = ?
          WHERE task_id = ? AND buyer_tenant_id = ?`
       ).bind(now, now, taskId, identity.tenantId),
-      auditInsert(identity, "privacy.artifact-task-content-purged", "artifact-task", taskId, now)
+      idempotentAuditInsert(
+        identity,
+        "privacy.artifact-task-content-purged",
+        "artifact-task",
+        taskId,
+        final.content_purged_at ?? now
+      )
     );
   }
-  await db.batch(statements);
-  return now;
+  if (statements.length > 0) await db.batch(statements);
+  return final?.content_purged_at ?? now;
+}
+
+function idempotentAuditInsert(
+  identity: RequestIdentity,
+  action: string,
+  resourceType: string,
+  resourceId: string,
+  occurredAt: string
+): D1PreparedStatement {
+  return getD1().prepare(IDEMPOTENT_CONTENT_PURGE_AUDIT_SQL).bind(
+    `audit-${action}-${resourceId}`,
+    identity.tenantId,
+    identity.actorId,
+    action,
+    resourceType,
+    resourceId,
+    occurredAt,
+    identity.tenantId,
+    action,
+    resourceType,
+    resourceId
+  );
 }
 
 function auditInsert(

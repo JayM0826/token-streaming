@@ -28,6 +28,7 @@ import {
   type SignedGatewayCall,
   verifySignedGatewayCall
 } from "./signature.js";
+import { PersistentReplayJournal } from "./replay-journal.js";
 
 export interface SupplierNodeLogEvent {
   event: "request.completed" | "request.failed" | "request.replayed" | "attestation.completed" | "attestation.failed";
@@ -54,7 +55,8 @@ interface IdempotencyEntry {
 
 export class SupplierNodeRuntime {
   private readonly capacity: CapacityGate;
-  private readonly replayGuard = new NonceReplayGuard();
+  private readonly replayJournal: PersistentReplayJournal;
+  private readonly replayGuard: NonceReplayGuard;
   private readonly idempotency = new Map<string, IdempotencyEntry>();
   private draining = false;
 
@@ -68,16 +70,21 @@ export class SupplierNodeRuntime {
     if (adapter.providerId !== config.providerId) {
       throw new Error("Configured provider adapter identity does not match SUPPLIER_NODE_PROVIDER_ID.");
     }
+    if (!config.replayJournalPath?.trim()) {
+      throw new Error("Supplier replay journal path is required for crash-safe replay protection.");
+    }
     this.capacity = new CapacityGate(
       config.limits.requestsPerMinute,
       config.limits.tokensPerMinute,
       config.limits.concurrency
     );
+    this.replayJournal = new PersistentReplayJournal(config.replayJournalPath, config.gatewayToken);
+    this.replayGuard = new NonceReplayGuard(5 * 60_000, 10_000, this.replayJournal);
   }
 
   health(): SupplierGatewayHealthResponse {
     return {
-      status: this.draining ? "draining" : "ready",
+      status: this.draining || !this.replayJournal.isHealthy() ? "draining" : "ready",
       protocol_version: SUPPLIER_GATEWAY_PROTOCOL_VERSION,
       provider_id: this.config.providerId,
       allowed_models: [...this.config.allowedModels],
@@ -98,6 +105,7 @@ export class SupplierNodeRuntime {
 
   setDraining(): void {
     this.draining = true;
+    this.replayJournal.close();
   }
 
   async handleAttestation(call: SignedGatewayCall, nowMs = Date.now()): Promise<SupplierNodeResult> {
@@ -170,6 +178,12 @@ export class SupplierNodeRuntime {
       if (this.idempotency.size >= this.maximumIdempotencyEntries) {
         throw new SupplierNodeError("CAPACITY_EXCEEDED", "节点幂等缓存已满，请稍后重试。", 503, true);
       }
+      this.replayJournal.claimRequest(
+        request.request_id,
+        verified.bodySha256,
+        nowMs + this.idempotencyTtlMs,
+        nowMs
+      );
       const result = this.execute(request, startedAt);
       this.idempotency.set(request.request_id, {
         bodySha256: verified.bodySha256,

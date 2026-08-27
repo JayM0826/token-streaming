@@ -1,7 +1,7 @@
 import type { SupplierNodeLogEvent, UpstreamProtocol } from "@token-streaming/supplier-node/runtime";
 
 export const SUPPLIER_AGENT_PROFILE_VERSION = 2 as const;
-export const SUPPLIER_AGENT_VAULT_VERSION = 1 as const;
+export const SUPPLIER_AGENT_VAULT_VERSION = 2 as const;
 
 export interface SupplierAgentProfileInput {
   providerId: string;

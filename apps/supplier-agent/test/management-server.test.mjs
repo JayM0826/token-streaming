@@ -27,18 +27,36 @@ test("loopback management requires its session token and never exposes provider 
 
   const page = await fetch(`${managementUrl}/`);
   assert.equal(page.status, 200);
-  const sessionCookie = page.headers.get("set-cookie") ?? "";
+  assert.equal(page.headers.get("set-cookie"), null);
   assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'none'/);
   assert.equal(page.headers.get("cross-origin-embedder-policy"), "require-corp");
-  assert.match(sessionCookie, /^gongsuanyun_agent_session=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=\/$/);
-  assert.equal((await page.text()).includes(management.sessionToken), false);
+  const pageBody = await page.text();
+  const launch = new URL(management.launchUrl);
+  const bootstrapToken = new URLSearchParams(launch.hash.slice(1)).get("bootstrap");
+  assert.match(bootstrapToken ?? "", /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(pageBody.includes(bootstrapToken), false);
 
   const unauthorized = await fetch(`${managementUrl}/api/status`);
   assert.equal(unauthorized.status, 401);
 
+  const bootstrap = await fetch(`${managementUrl}/api/bootstrap`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: managementUrl },
+    body: JSON.stringify({ bootstrapToken })
+  });
+  assert.equal(bootstrap.status, 200);
+  const sessionCookie = bootstrap.headers.get("set-cookie") ?? "";
+  assert.match(sessionCookie, /^gongsuanyun_agent_session=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=\/$/);
+  const bootstrapReplay = await fetch(`${managementUrl}/api/bootstrap`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: managementUrl },
+    body: JSON.stringify({ bootstrapToken })
+  });
+  assert.equal(bootstrapReplay.status, 401);
+
   const gatewayToken = "gateway-token-abcdefghijklmnopqrstuvwxyz-123456";
   const upstreamApiKey = "upstream-secret-abcdefghijklmnopqrstuvwxyz";
-  const connection = await api(management, sessionCookie, "/api/setup", {
+  const setupBody = {
     profile: {
       providerId: "provider-test",
       allowedModels: ["model-exact-2026-08-25"],
@@ -62,8 +80,18 @@ test("loopback management requires its session token and never exposes provider 
     upstreamApiKey,
     gatewayToken,
     passphrase: "correct horse battery staple"
-  });
+  };
+  const connection = await api(management, sessionCookie, "/api/setup", setupBody);
   assert.equal(connection.gatewayBearerToken, gatewayToken);
+
+  const overwrite = await rawApi(management, sessionCookie, "/api/setup", {
+    ...setupBody,
+    upstreamApiKey: "attacker-replacement-upstream-secret",
+    gatewayToken: "attacker-replacement-gateway-token-value-123456",
+    passphrase: "replacement passphrase value"
+  });
+  assert.equal(overwrite.response.status, 409);
+  assert.equal(overwrite.result.error.code, "ALREADY_CONFIGURED");
 
   const status = await api(management, sessionCookie, "/api/status", undefined, "GET");
   assert.equal(status.nodeStatus, "online");

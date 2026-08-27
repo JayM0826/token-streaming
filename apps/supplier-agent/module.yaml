@@ -15,10 +15,19 @@ rules:
   - Keep supplier-node as the headless kernel; the local GUI and TUI contain no inference or billing logic.
   - Bind the management server and inference gateway to loopback by default.
   - Encrypt upstream and gateway credentials at rest with a user passphrase; never log, persist in plaintext, or place them in URLs.
-  - Keep the high-entropy per-process management token in an HttpOnly SameSite=Strict loopback Cookie, never in URLs or frontend JavaScript, and require same-origin checks for local state changes.
+  - Bind vault version 2 to a domain-separated digest of the complete canonical validated profile through AES-GCM additional authenticated data; reject any profile mutation and fail closed on unbound vault version 1.
+  - Bootstrap the loopback UI with a one-time high-entropy launch secret carried only in the URL fragment; erase the fragment immediately, exchange it once through a same-origin POST, then keep the management session only in an HttpOnly SameSite=Strict Cookie.
+  - Reject setup when a profile/vault pair already exists or another setup is in flight; never overwrite stored credentials through first-run setup.
+  - Require a drained, backed-up, credential-rotated fresh setup for legacy vault version 1 or intentional profile changes; do not auto-migrate an unbound profile.
   - Reauthenticate every gateway-token reveal, erase the displayed value after 60 seconds, and throttle repeated or parallel passphrase failures.
   - Never expose prompts, outputs, upstream credentials, or gateway credentials through status endpoints.
   - Claim large-file tasks only through outbound signed control calls; keep original bytes out of checkpoints and ordinary work directories.
-  - Encrypt resumable checkpoints at rest, bind them to task identity, and delete them after terminal completion or a non-retryable failure.
+  - Use checkpoint envelope v2 with version, task identity, createdAt, and expiresAt authenticated as AES-GCM AAD; preserve a non-sliding lifetime with a six-hour default and hard maximum.
+  - For resume_from_segment above zero, require an authenticated checkpoint with the exact task and completed segment or fail non-retryably with ARTIFACT_CHECKPOINT_REQUIRED before input download or Provider execution; when a new attempt starts at segment zero, delete the same-task prior checkpoint, pass no old state to runtime, and let the new attempt establish a fresh fixed six-hour lifetime.
+  - Before every artifact claim, scan a bounded checkpoint batch and remove expired, legacy-v1, corrupt, and orphaned temporary files; if any discovered unsafe file cannot be removed, fail non-retryably with CHECKPOINT_CLEANUP_FAILED and do not send a claim.
+  - Also fail closed with CHECKPOINT_CLEANUP_FAILED when an unsafe current-task checkpoint cannot be discarded during read.
+  - After accepted terminal completion, map checkpoint deletion failure to CHECKPOINT_CLEANUP_FAILED without reporting task failure; retain a process-local pending terminal delete and retry it before, and block, every later claim until deletion succeeds.
+  - Route checkpoint deletion after every non-retryable terminal failure through the same pending-delete path; a failed delete blocks later claims until it succeeds.
+  - After restart, rely on the authenticated non-sliding six-hour expiry and pre-claim fail-closed cleanup to bound a leftover terminal checkpoint; never store original customer bytes in checkpoints.
   - Propagate the accepted privacy mode through artifact-worker.v2 and delete cancelled-task checkpoints without retry.
   - Treat public tunnel or reverse-proxy setup as an explicit deployment boundary; never open router ports automatically.

@@ -1,6 +1,5 @@
 import {
   MARKETPLACE_API_VERSION,
-  MARKETPLACE_SCHEMA_VERSION,
   SUPPLIER_GATEWAY_PROTOCOL_VERSION,
   type AuthorizationRequestView,
   type CapacityOfferView,
@@ -38,10 +37,11 @@ import {
 } from "@token-streaming/marketplace-domain";
 
 import { ensureSchema, getD1 } from "@/db";
-import { ApiError } from "./http";
+import { ApiError, readBoundedText } from "./http";
 import {
   decryptContent,
   decryptCredential,
+  createCredentialLookupDigest,
   createDigestCommitment,
   encryptContent,
   encryptCredential,
@@ -56,6 +56,19 @@ import { createSignedGatewayHeaders } from "./gateway-signing";
 import { attestSupplierGateway } from "./gateway-attestation";
 import { verifyGatewayServiceEvidence, type VerifiedGatewayServiceEvidence } from "./gateway-evidence";
 import { listArtifacts, listArtifactTasks } from "./artifact-service";
+import {
+  AVAILABLE_BALANCE_SQL,
+  COMPLETE_INFERENCE_JOB_SQL,
+  RESERVE_INFERENCE_JOB_SQL
+} from "./financial-invariants";
+import {
+  ACTIVATE_REVIEWED_SUPPLIER_SQL,
+  APPROVE_AUTHORIZATION_REQUEST_SQL,
+  BIND_AUTHORIZATION_REVIEW_COMMAND_SQL,
+  CLAIM_AUTHORIZATION_REVIEW_TARGET_SQL,
+  REJECT_AUTHORIZATION_REQUEST_SQL
+} from "./review-invariants";
+import { isAuthorizationValidityAllowed } from "./authorization-invariants";
 
 interface SupplierRow {
   supplier_id: string;
@@ -94,9 +107,11 @@ interface AuthorizationRow {
   encrypted_gateway_token: string;
   gateway_token_iv: string;
   gateway_token_digest: string | null;
+  gateway_token_digest_version: number;
   encryption_key_version: number;
   status: AuthorizationRequestView["status"];
   review_note: string | null;
+  review_command_id: string | null;
   reviewed_at: string | null;
   created_at: string;
 }
@@ -138,6 +153,7 @@ interface EventRow {
   aggregate_id: string;
   aggregate_version: number;
   event_type: MarketplaceEvent["type"];
+  schema_version: number;
   payload_json: string;
   occurred_at: string;
 }
@@ -148,6 +164,12 @@ interface JobRow {
   offer_id: string;
   model: string;
   privacy_mode: MarketplacePrivacyMode;
+  prompt_digest?: string;
+  digest_version?: number;
+  data_class?: "P0" | "P1";
+  max_output_tokens?: number;
+  reserved_charge_micros: string;
+  reservation_expires_at: string | null;
   status: InferenceJobView["status"];
   total_tokens: number | null;
   charge_micros: string | null;
@@ -185,6 +207,7 @@ interface LedgerRow {
 export async function getDashboard(identity: RequestIdentity): Promise<MarketplaceDashboardSnapshot> {
   await ensureSchema();
   await ensureUser(identity);
+  await cleanupStaleInferenceReservations();
   await cleanupExpiredInferenceContent();
   const db = getD1();
   const now = new Date().toISOString();
@@ -223,10 +246,10 @@ export async function getDashboard(identity: RequestIdentity): Promise<Marketpla
        JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
        JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id AND ar.status = 'approved'
        WHERE o.status = 'active' AND o.valid_from <= ? AND o.valid_until > ?
-         AND s.status = 'active' AND s.supply_enabled = 1
+         AND ar.valid_until > ? AND s.status = 'active' AND s.supply_enabled = 1
        ORDER BY CAST(o.price_micros_per_million_tokens AS INTEGER) ASC, o.created_at ASC LIMIT 50`
     )
-    .bind(now, now)
+    .bind(now, now, now)
     .all<OfferRow>();
 
   const ledger = await db
@@ -400,7 +423,7 @@ export async function submitAuthorizationRequest(
     tenantId: identity.tenantId,
     authorizationRequestId: requestId
   });
-  const gatewayTokenDigest = await sha256Hex(input.gatewayBearerToken);
+  const gatewayTokenDigest = await createCredentialLookupDigest(input.gatewayBearerToken);
   const db = getD1();
   const supplier = await requireSupplierRow(identity);
   if (supplier.status === "suspended" || supplier.status === "rejected") {
@@ -413,9 +436,10 @@ export async function submitAuthorizationRequest(
         `INSERT INTO authorization_requests (
           request_id, tenant_id, supplier_id, provider_id, source_type, metering_mode, evidence_ref,
           model_pattern, region_code, data_classes_json, requests_per_minute, tokens_per_minute,
-          concurrency, max_output_tokens, valid_until, gateway_endpoint, encrypted_gateway_token,
-          gateway_token_iv, gateway_token_digest, encryption_key_version, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+           concurrency, max_output_tokens, valid_until, gateway_endpoint, encrypted_gateway_token,
+           gateway_token_iv, gateway_token_digest, gateway_token_digest_version,
+           encryption_key_version, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
       )
       .bind(
         requestId,
@@ -436,7 +460,8 @@ export async function submitAuthorizationRequest(
         gateway.toString(),
         encrypted.ciphertext,
         encrypted.iv,
-        gatewayTokenDigest,
+        gatewayTokenDigest.digest,
+        gatewayTokenDigest.version,
         encrypted.keyVersion,
         now,
         now
@@ -465,8 +490,21 @@ export async function reviewAuthorization(
   if (input.decision !== "approve" && input.decision !== "reject") {
     throw new ApiError("INVALID_REQUEST", "审核决定必须是 approve 或 reject。", 400);
   }
+  const reviewBinding = `${requestId}:${input.decision}`;
   const prior = await readIdempotency(identity.tenantId, "authorization.review", input.commandId);
-  if (prior) return getDashboard(identity);
+  if (prior) {
+    if (prior !== reviewBinding) {
+      throw new ApiError("CONFLICT", "该审核幂等键已绑定到其他申请或审核决定。", 409);
+    }
+    const replayed = await getD1().prepare(
+      "SELECT status, review_command_id FROM authorization_requests WHERE request_id = ?"
+    ).bind(requestId).first<{ status: string; review_command_id: string | null }>();
+    if (replayed?.status !== (input.decision === "approve" ? "approved" : "rejected") ||
+        replayed.review_command_id !== input.commandId) {
+      throw new ApiError("CONFLICT", "该审核命令未形成完整的审核结果。", 409);
+    }
+    return getDashboard(identity);
+  }
   await enforceTenantRateLimit(identity, "authorization.review", 60, 60 * 60_000);
 
   const db = getD1();
@@ -478,20 +516,35 @@ export async function reviewAuthorization(
   if (request.status !== "pending") throw new ApiError("CONFLICT", "授权申请已经完成审核。", 409);
   const now = new Date().toISOString();
   const note = normalizeOptionalText(input.reviewNote, 500);
+  const reviewOperationToken = `review-op-${crypto.randomUUID()}`;
 
   if (input.decision === "reject") {
     await db.batch([
+      reviewTargetClaimInsert(
+        db, identity.tenantId, requestId, input.commandId,
+        reviewBinding, reviewOperationToken, now
+      ),
+      guardedReviewIdempotencyInsert(
+        db, identity.tenantId, input.commandId, reviewBinding,
+        requestId, reviewOperationToken, now
+      ),
       db
-        .prepare(
-          `UPDATE authorization_requests SET status = 'rejected', review_note = ?, reviewed_by = ?,
-           reviewed_at = ?, updated_at = ? WHERE request_id = ? AND status = 'pending'`
-        )
-        .bind(note ?? "未通过生产授权审核", identity.actorId, now, now, requestId),
-      auditInsert(db, identity, "authorization.rejected", "authorization-request", requestId, {
+        .prepare(REJECT_AUTHORIZATION_REQUEST_SQL)
+        .bind(
+          note ?? "未通过生产授权审核", identity.actorId, input.commandId, now, now, requestId,
+          requestId, reviewOperationToken,
+          identity.tenantId, input.commandId, reviewBinding
+        ),
+      guardedReviewAuditInsert(db, identity, "authorization.rejected", requestId, input.commandId, reviewOperationToken, {
         supplierTenantId: request.tenant_id
-      }, now),
-      idempotencyInsert(db, identity.tenantId, "authorization.review", input.commandId, requestId, now)
+      }, now)
     ]);
+    const reviewed = await db.prepare(
+      "SELECT status, review_command_id FROM authorization_requests WHERE request_id = ?"
+    ).bind(requestId).first<{ status: string; review_command_id: string | null }>();
+    if (reviewed?.status !== "rejected" || reviewed.review_command_id !== input.commandId) {
+      throw new ApiError("CONFLICT", "授权申请已被其他审核操作处理。", 409);
+    }
     return getDashboard(identity);
   }
 
@@ -522,35 +575,65 @@ export async function reviewAuthorization(
     throw new ApiError("INTERNAL_ERROR", "供应商激活状态生成失败。", 500);
   }
 
-  const statements = events.map((event) => eventInsert(db, event));
-  statements.push(
+  const expectedSupplierVersion = resultingState.version - events.length;
+  const statements = [
+    reviewTargetClaimInsert(
+      db, identity.tenantId, requestId, input.commandId,
+      reviewBinding, reviewOperationToken, now
+    ),
+    guardedReviewIdempotencyInsert(
+      db, identity.tenantId, input.commandId, reviewBinding,
+      requestId, reviewOperationToken, now
+    ),
     db
-      .prepare(
-        `UPDATE suppliers SET status = 'active', version = ?, updated_at = ?
-         WHERE supplier_id = ? AND tenant_id = ? AND version = ?`
-      )
+      .prepare(APPROVE_AUTHORIZATION_REQUEST_SQL)
+      .bind(
+        note ?? "生产授权与节点健康证明审核通过", identity.actorId, input.commandId,
+        now, now, requestId, request.supplier_id, request.tenant_id, expectedSupplierVersion,
+        requestId, reviewOperationToken,
+        identity.tenantId, input.commandId, reviewBinding
+      ),
+    db
+      .prepare(ACTIVATE_REVIEWED_SUPPLIER_SQL)
       .bind(
         resultingState.version,
         now,
         request.supplier_id,
         request.tenant_id,
-        resultingState.version - events.length
+        expectedSupplierVersion,
+        requestId,
+        input.commandId,
+        requestId,
+        reviewOperationToken
       ),
-    db
-      .prepare(
-        `UPDATE authorization_requests SET status = 'approved', review_note = ?, reviewed_by = ?,
-         reviewed_at = ?, updated_at = ? WHERE request_id = ? AND status = 'pending'`
-      )
-      .bind(note ?? "生产授权与节点健康证明审核通过", identity.actorId, now, now, requestId),
-    auditInsert(db, identity, "authorization.approved", "authorization-request", requestId, {
+    ...events.map((event) => guardedReviewEventInsert(
+      db, event, requestId, input.commandId, reviewOperationToken, resultingState.version
+    )),
+    guardedReviewAuditInsert(db, identity, "authorization.approved", requestId, input.commandId, reviewOperationToken, {
       supplierTenantId: request.tenant_id,
       providerId: request.provider_id,
       attestedModelCount: attestation.matchedModels.length,
       attestedCapacity: attestation.limits
-    }, now),
-    idempotencyInsert(db, identity.tenantId, "authorization.review", input.commandId, requestId, now)
-  );
+    }, now)
+  ];
   await db.batch(statements);
+  const reviewed = await db.prepare(
+    `SELECT ar.status, ar.review_command_id, s.status AS supplier_status, s.version AS supplier_version
+     FROM authorization_requests ar
+     JOIN suppliers s ON s.supplier_id = ar.supplier_id AND s.tenant_id = ar.tenant_id
+     WHERE ar.request_id = ?`
+  ).bind(requestId).first<{
+    status: string;
+    review_command_id: string | null;
+    supplier_status: string;
+    supplier_version: number;
+  }>();
+  if (
+    reviewed?.status !== "approved" || reviewed.review_command_id !== input.commandId ||
+    reviewed.supplier_status !== "active" || reviewed.supplier_version !== resultingState.version
+  ) {
+    throw new ApiError("CONFLICT", "授权申请已被其他审核操作处理。", 409);
+  }
   return getDashboard(identity);
 }
 
@@ -691,6 +774,7 @@ export async function runInference(
 ): Promise<RunInferenceResponse> {
   await ensureSchema();
   await ensureUser(identity);
+  await cleanupStaleInferenceReservations();
   await cleanupExpiredInferenceContent();
   assertExactKeys(input, [
     "model", "input", "dataClass", "maxOutputTokens", "privacyMode",
@@ -700,25 +784,11 @@ export async function runInference(
   assertIdempotencyKey(idempotencyKey);
   const db = getD1();
 
-  const existing = await db
-    .prepare(
-      `SELECT j.*,
-        se.provider_id AS proof_provider_id,
-        se.requested_model AS proof_requested_model,
-        se.served_model AS proof_served_model,
-        se.provider_request_id AS proof_provider_request_id,
-        se.assurance AS proof_assurance,
-        se.evidence_digest AS proof_evidence_digest,
-        se.unit_price_micros_per_million_tokens AS proof_unit_price,
-        se.buyer_charge_micros AS proof_buyer_charge,
-        se.provider_completed_at AS proof_completed_at
-       FROM inference_jobs j
-       LEFT JOIN service_evidence se ON se.job_id = j.job_id
-       WHERE j.buyer_tenant_id = ? AND j.idempotency_key = ?`
-    )
-    .bind(identity.tenantId, idempotencyKey)
-    .first<JobRow>();
-  if (existing) return replayInference(existing, requestId);
+  const existing = await readInferenceForReplay(identity.tenantId, idempotencyKey);
+  if (existing) {
+    await assertInferenceIdempotencyMatch(identity.tenantId, existing, input);
+    return replayInference(existing, requestId);
+  }
 
   const policy = getMarketplaceRuntimePolicy();
   await enforceTenantRateLimit(identity, "inference.run", policy.inferenceRequestsPerMinute, 60_000);
@@ -727,14 +797,10 @@ export async function runInference(
   const offer = await selectOffer(identity.tenantId, input, now);
   const estimatedInputTokens = Math.max(1, new TextEncoder().encode(input.input).byteLength);
   const estimatedCharge = estimateMaximumChargeMicros({
-    estimatedInputTokens,
+    estimatedInputTokens: estimatedInputTokens + 256,
     maxOutputTokens: input.maxOutputTokens,
     priceMicrosPerMillionTokens: offer.price_micros_per_million_tokens
   });
-  const balance = await readBalanceMicros(identity.tenantId);
-  if (balance < BigInt(estimatedCharge)) {
-    throw new ApiError("INSUFFICIENT_BALANCE", "试运营余额不足以覆盖本次请求的最大费用。", 402);
-  }
 
   const jobId = `job-${crypto.randomUUID()}`;
   const inputSha256 = await sha256Hex(input.input);
@@ -743,15 +809,11 @@ export async function runInference(
     tenantId: identity.tenantId,
     resourceId: jobId
   });
+  const reservationExpiresAt = new Date(
+    Date.now() + policy.inferenceReservationTimeoutSeconds * 1_000
+  ).toISOString();
   const reservation = await db
-    .prepare(
-      `INSERT INTO inference_jobs (
-        job_id, buyer_tenant_id, supplier_tenant_id, offer_id, idempotency_key, model,
-        data_class, privacy_mode, prompt_digest, digest_version, max_output_tokens, status, created_at
-      )
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?
-      WHERE (SELECT COUNT(*) FROM inference_jobs WHERE offer_id = ? AND status IN ('reserved', 'running')) < ?`
-    )
+    .prepare(RESERVE_INFERENCE_JOB_SQL)
     .bind(
       jobId,
       identity.tenantId,
@@ -764,19 +826,43 @@ export async function runInference(
       inputCommitment.digest,
       inputCommitment.version,
       input.maxOutputTokens,
+      estimatedCharge,
+      reservationExpiresAt,
       now,
+      identity.tenantId,
+      identity.tenantId,
+      identity.tenantId,
+      estimatedCharge,
+      offer.offer_id,
+      now,
+      now,
+      now,
+      offer.offer_id,
       offer.offer_id,
       offer.concurrency
     )
     .run();
   if ((reservation.meta.changes ?? 0) !== 1) {
+    const raced = await readInferenceForReplay(identity.tenantId, idempotencyKey);
+    if (raced) {
+      await assertInferenceIdempotencyMatch(identity.tenantId, raced, input);
+      return replayInference(raced, requestId);
+    }
+    if ((await readBalanceMicros(identity.tenantId)) < BigInt(estimatedCharge)) {
+      throw new ApiError("INSUFFICIENT_BALANCE", "试运营余额不足以覆盖本次请求的最大费用。", 402);
+    }
     throw new ApiError("CAPACITY_UNAVAILABLE", "所选容量刚刚被占用，请稍后重试。", 409, true);
   }
 
-  await db
-    .prepare("UPDATE inference_jobs SET status = 'running' WHERE job_id = ? AND status = 'reserved'")
-    .bind(jobId)
+  const started = await db
+    .prepare(
+      "UPDATE inference_jobs SET status = 'running' WHERE job_id = ? AND status = 'reserved' AND reservation_expires_at > ?"
+    )
+    .bind(jobId, now)
     .run();
+  if ((started.meta.changes ?? 0) !== 1) {
+    throw new ApiError("CAPACITY_UNAVAILABLE", "请求预留已过期，请使用新的幂等键重试。", 409, true);
+  }
 
   try {
     const gateway = validateGatewayEndpoint(requiredText(offer.gateway_endpoint, "gatewayEndpoint"), true);
@@ -802,8 +888,8 @@ export async function runInference(
       priceMicrosPerMillionTokens: offer.price_micros_per_million_tokens,
       platformFeeBps: policy.platformFeeBps
     });
-    if ((await readBalanceMicros(identity.tenantId)) < BigInt(settlement.buyerChargeMicros)) {
-      throw new ApiError("INSUFFICIENT_BALANCE", "最终计量超过可用余额，平台已阻止记账。", 409);
+    if (BigInt(settlement.buyerChargeMicros) > BigInt(estimatedCharge)) {
+      throw new ApiError("GATEWAY_FAILED", "最终计量超过请求预留上限，平台已阻止记账。", 502);
     }
     const outputEncrypted = await encryptContent(gatewayResult.output, {
       purpose: "inference-output",
@@ -833,12 +919,7 @@ export async function runInference(
     });
     const statements = [
       db
-        .prepare(
-          `UPDATE inference_jobs SET status = 'completed', provider_request_id = ?, input_tokens = ?,
-           output_tokens = ?, total_tokens = ?, charge_micros = ?, output_ciphertext = ?, output_iv = ?,
-           content_key_version = ?, output_expires_at = ?, completed_at = ?
-           WHERE job_id = ? AND status = 'running'`
-        )
+        .prepare(COMPLETE_INFERENCE_JOB_SQL)
         .bind(
           gatewayResult.providerRequestId,
           gatewayResult.usage.inputTokens,
@@ -850,14 +931,24 @@ export async function runInference(
           outputEncrypted.keyVersion,
           outputExpiresAt,
           completedAt,
-          jobId
+          jobId,
+          settlement.buyerChargeMicros,
+          identity.tenantId,
+          identity.tenantId,
+          jobId,
+          identity.tenantId,
+          settlement.buyerChargeMicros
         ),
       db
         .prepare(
           `INSERT INTO usage_records (
             usage_id, job_id, buyer_tenant_id, supplier_tenant_id, offer_id, provider_request_id,
             input_tokens, output_tokens, total_tokens, receipt_ref, occurred_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (
+              SELECT 1 FROM inference_jobs
+              WHERE job_id = ? AND status = 'completed' AND completed_at = ?
+            )`
         )
         .bind(
           usageId,
@@ -870,6 +961,8 @@ export async function runInference(
           gatewayResult.usage.outputTokens,
           gatewayResult.usage.totalTokens,
           gatewayResult.receiptRef,
+          completedAt,
+          jobId,
           completedAt
         ),
       db
@@ -880,7 +973,11 @@ export async function runInference(
             input_tokens, output_tokens, total_tokens, unit_price_micros_per_million_tokens,
             buyer_charge_micros, supplier_credit_micros, platform_fee_micros, receipt_ref,
             provider_completed_at, recorded_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (
+              SELECT 1 FROM inference_jobs
+              WHERE job_id = ? AND status = 'completed' AND completed_at = ? AND charge_micros = ?
+            )`
         )
         .bind(
           `evidence-${crypto.randomUUID()}`,
@@ -904,11 +1001,14 @@ export async function runInference(
           settlement.platformFeeMicros,
           gatewayResult.evidence.receiptRef,
           gatewayResult.evidence.completedAt,
-          completedAt
+          completedAt,
+          jobId,
+          completedAt,
+          settlement.buyerChargeMicros
         ),
-      ledgerInsert(db, identity.tenantId, `buyer-${identity.tenantId}`, jobId, "inference-debit", "debit", settlement.buyerChargeMicros, completedAt),
-      ledgerInsert(db, offer.supplier_tenant_id!, `supplier-${offer.supplier_tenant_id}`, jobId, "supplier-credit", "credit", settlement.supplierCreditMicros, completedAt),
-      auditInsert(db, identity, "inference.completed", "inference-job", jobId, {
+      guardedInferenceLedgerInsert(db, identity.tenantId, `buyer-${identity.tenantId}`, jobId, "inference-debit", "debit", settlement.buyerChargeMicros, completedAt, gatewayResult.evidence.evidenceDigest),
+      guardedInferenceLedgerInsert(db, offer.supplier_tenant_id!, `supplier-${offer.supplier_tenant_id}`, jobId, "supplier-credit", "credit", settlement.supplierCreditMicros, completedAt, gatewayResult.evidence.evidenceDigest),
+      guardedInferenceAuditInsert(db, identity, jobId, {
         offerId: offer.offer_id,
         providerId: gatewayResult.evidence.providerId,
         requestedModel: gatewayResult.evidence.requestedModel,
@@ -917,14 +1017,21 @@ export async function runInference(
         evidenceDigest: gatewayResult.evidence.evidenceDigest,
         totalTokens: gatewayResult.usage.totalTokens,
         chargeMicros: settlement.buyerChargeMicros
-      }, completedAt)
+      }, completedAt, gatewayResult.evidence.evidenceDigest)
     ];
     if (settlement.platformFeeMicros !== "0") {
       statements.push(
-        ledgerInsert(db, "platform", "platform-fees", jobId, "platform-fee", "credit", settlement.platformFeeMicros, completedAt)
+        guardedInferenceLedgerInsert(db, "platform", "platform-fees", jobId, "platform-fee", "credit", settlement.platformFeeMicros, completedAt, gatewayResult.evidence.evidenceDigest)
       );
     }
     await db.batch(statements);
+    const committed = await db.prepare(
+      `SELECT j.status, se.evidence_digest FROM inference_jobs j
+       LEFT JOIN service_evidence se ON se.job_id = j.job_id WHERE j.job_id = ?`
+    ).bind(jobId).first<{ status: string; evidence_digest: string | null }>();
+    if (committed?.status !== "completed" || committed.evidence_digest !== gatewayResult.evidence.evidenceDigest) {
+      throw new ApiError("INSUFFICIENT_BALANCE", "预留已失效或可用余额不足，平台未写入任何结算记录。", 409);
+    }
 
     return {
       ok: true,
@@ -951,7 +1058,10 @@ export async function runInference(
   } catch (error) {
     const code = error instanceof ApiError ? error.code : "GATEWAY_FAILED";
     await db
-      .prepare("UPDATE inference_jobs SET status = 'failed', error_code = ?, completed_at = ? WHERE job_id = ?")
+      .prepare(
+        `UPDATE inference_jobs SET status = 'failed', reservation_expires_at = NULL,
+         error_code = ?, completed_at = ? WHERE job_id = ? AND status IN ('reserved', 'running')`
+      )
       .bind(code, new Date().toISOString(), jobId)
       .run();
     throw error;
@@ -1008,7 +1118,7 @@ async function readSupplierEvents(tenantId: string, supplierId: string): Promise
     .bind(tenantId, supplierId)
     .all<EventRow>();
   return result.results.map((row) => ({
-    schemaVersion: MARKETPLACE_SCHEMA_VERSION,
+    schemaVersion: row.schema_version,
     eventId: row.event_id,
     tenantId: row.tenant_id,
     actorId: row.actor_id,
@@ -1111,7 +1221,7 @@ async function selectOffer(buyerTenantId: string, input: RunInferenceRequest, no
        JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
        JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id AND ar.status = 'approved'
        WHERE o.status = 'active' AND o.model = ? AND o.valid_from <= ? AND o.valid_until > ?
-         AND o.data_classes_json LIKE ? AND o.max_output_tokens >= ?
+         AND ar.valid_until > ? AND o.data_classes_json LIKE ? AND o.max_output_tokens >= ?
          AND s.status = 'active' AND s.supply_enabled = 1 AND s.tenant_id <> ?
          AND (SELECT COALESCE(SUM(total_tokens), 0) FROM usage_records
               WHERE offer_id = o.offer_id AND occurred_at > ?) + ? <= o.tokens_per_minute
@@ -1120,6 +1230,7 @@ async function selectOffer(buyerTenantId: string, input: RunInferenceRequest, no
     )
     .bind(
       input.model,
+      now,
       now,
       now,
       classNeedle,
@@ -1162,6 +1273,7 @@ async function callGateway(
   try {
     response = await fetch(endpoint, {
       method: "POST",
+      redirect: "error",
       headers: {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
@@ -1173,15 +1285,10 @@ async function callGateway(
   } catch {
     throw new ApiError("GATEWAY_FAILED", "供应网关连接失败或超时。", 502, true);
   }
-  const declaredLength = Number(response.headers.get("content-length") ?? 0);
   const maximumResponseBytes = getMarketplaceRuntimePolicy().maximumGatewayResponseBytes;
-  if (declaredLength > maximumResponseBytes) {
-    throw new ApiError("GATEWAY_FAILED", "供应网关响应超过大小限制。", 502);
-  }
-  const raw = await response.text();
-  if (new TextEncoder().encode(raw).byteLength > maximumResponseBytes) {
-    throw new ApiError("GATEWAY_FAILED", "供应网关响应超过大小限制。", 502);
-  }
+  const raw = await readBoundedText(response, maximumResponseBytes, () =>
+    new ApiError("GATEWAY_FAILED", "供应网关响应超过大小限制。", 502)
+  );
   if (!response.ok) throw new ApiError("GATEWAY_FAILED", `供应网关返回 HTTP ${response.status}。`, 502, response.status >= 500);
   let parsed: unknown;
   try {
@@ -1277,6 +1384,51 @@ async function replayInference(existing: JobRow, requestId: string): Promise<Run
   };
 }
 
+async function readInferenceForReplay(tenantId: string, idempotencyKey: string): Promise<JobRow | null> {
+  return getD1()
+    .prepare(
+      `SELECT j.*,
+        se.provider_id AS proof_provider_id,
+        se.requested_model AS proof_requested_model,
+        se.served_model AS proof_served_model,
+        se.provider_request_id AS proof_provider_request_id,
+        se.assurance AS proof_assurance,
+        se.evidence_digest AS proof_evidence_digest,
+        se.unit_price_micros_per_million_tokens AS proof_unit_price,
+        se.buyer_charge_micros AS proof_buyer_charge,
+        se.provider_completed_at AS proof_completed_at
+       FROM inference_jobs j
+       LEFT JOIN service_evidence se ON se.job_id = j.job_id
+       WHERE j.buyer_tenant_id = ? AND j.idempotency_key = ?`
+    )
+    .bind(tenantId, idempotencyKey)
+    .first<JobRow>();
+}
+
+async function assertInferenceIdempotencyMatch(
+  tenantId: string,
+  existing: JobRow,
+  input: RunInferenceRequest
+): Promise<void> {
+  const inputSha256 = await sha256Hex(input.input);
+  const expectedDigest = (existing.digest_version ?? 1) >= 2
+    ? (await createDigestCommitment(inputSha256, {
+        purpose: "prompt",
+        tenantId,
+        resourceId: existing.job_id
+      })).digest
+    : inputSha256;
+  if (
+    existing.prompt_digest !== expectedDigest ||
+    existing.model !== input.model ||
+    existing.data_class !== input.dataClass ||
+    existing.privacy_mode !== input.privacyMode ||
+    existing.max_output_tokens !== input.maxOutputTokens
+  ) {
+    throw new ApiError("CONFLICT", "该幂等键已绑定到不同的推理请求。", 409);
+  }
+}
+
 async function readUsageSummary(tenantId: string): Promise<MarketplaceDashboardSnapshot["usage"]> {
   const row = await getD1()
     .prepare(
@@ -1322,6 +1474,19 @@ async function cleanupExpiredInferenceContent(now = new Date().toISOString()): P
   ).bind(now, now).run();
 }
 
+async function cleanupStaleInferenceReservations(now = new Date().toISOString()): Promise<void> {
+  const legacyReservationCutoff = new Date(
+    Date.parse(now) - getMarketplaceRuntimePolicy().inferenceReservationTimeoutSeconds * 1_000
+  ).toISOString();
+  await getD1().prepare(
+    `UPDATE inference_jobs SET status = 'failed', reservation_expires_at = NULL,
+       error_code = 'EXECUTION_TIMEOUT', completed_at = ?
+     WHERE status IN ('reserved', 'running') AND (
+       reservation_expires_at <= ? OR (reservation_expires_at IS NULL AND created_at <= ?)
+     )`
+  ).bind(now, now, legacyReservationCutoff).run();
+}
+
 function outputRetentionMilliseconds(
   privacyMode: MarketplacePrivacyMode,
   policy: ReturnType<typeof getMarketplaceRuntimePolicy>
@@ -1331,16 +1496,10 @@ function outputRetentionMilliseconds(
 
 async function readBalanceMicros(tenantId: string): Promise<bigint> {
   const row = await getD1()
-    .prepare(
-      `SELECT
-        printf('%lld', COALESCE((SELECT SUM(CASE WHEN direction = 'credit' THEN CAST(amount_micros AS INTEGER)
-          ELSE -CAST(amount_micros AS INTEGER) END) FROM ledger_entries WHERE tenant_id = ?), 0)) AS balance,
-        printf('%lld', COALESCE((SELECT SUM(CAST(reserved_charge_micros AS INTEGER)) FROM artifact_tasks
-          WHERE buyer_tenant_id = ? AND status IN ('queued', 'claimed', 'running')), 0)) AS reserved`
-    )
-    .bind(tenantId, tenantId)
-    .first<{ balance: string; reserved: string }>();
-  return BigInt(row?.balance ?? "0") - BigInt(row?.reserved ?? "0");
+    .prepare(AVAILABLE_BALANCE_SQL)
+    .bind(tenantId, tenantId, tenantId)
+    .first<{ available: string }>();
+  return BigInt(row?.available ?? "0");
 }
 
 async function readIdempotency(tenantId: string, operation: string, key: string): Promise<string | null> {
@@ -1484,8 +1643,8 @@ function eventInsert(db: D1Database, event: MarketplaceEvent): D1PreparedStateme
     .prepare(
       `INSERT INTO marketplace_events (
         event_id, tenant_id, actor_id, causation_id, aggregate_type, aggregate_id,
-        aggregate_version, event_type, payload_json, occurred_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        aggregate_version, event_type, schema_version, payload_json, occurred_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       event.eventId,
@@ -1496,9 +1655,101 @@ function eventInsert(db: D1Database, event: MarketplaceEvent): D1PreparedStateme
       event.aggregateId,
       event.aggregateVersion,
       event.type,
+      event.schemaVersion,
       JSON.stringify(event.payload),
       event.occurredAt
     );
+}
+
+function guardedReviewEventInsert(
+  db: D1Database,
+  event: MarketplaceEvent,
+  requestId: string,
+  reviewCommandId: string,
+  reviewOperationToken: string,
+  supplierVersion: number
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO marketplace_events (
+      event_id, tenant_id, actor_id, causation_id, aggregate_type, aggregate_id,
+      aggregate_version, event_type, schema_version, payload_json, occurred_at
+    ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM authorization_requests
+        WHERE request_id = ? AND status = 'approved' AND review_command_id = ?
+      ) AND EXISTS (
+        SELECT 1 FROM suppliers
+        WHERE supplier_id = ? AND tenant_id = ? AND version = ? AND status = 'active'
+      ) AND EXISTS (
+        SELECT 1 FROM idempotency_keys
+        WHERE tenant_id = 'platform' AND operation = 'authorization.review-target'
+          AND idempotency_key = ? AND resource_id = ?
+      )`
+  ).bind(
+    event.eventId, event.tenantId, event.actorId, event.causationId, event.aggregateType,
+    event.aggregateId, event.aggregateVersion, event.type, event.schemaVersion,
+    JSON.stringify(event.payload), event.occurredAt, requestId, reviewCommandId,
+    event.aggregateId, event.tenantId, supplierVersion, requestId, reviewOperationToken
+  );
+}
+
+function guardedReviewAuditInsert(
+  db: D1Database,
+  identity: RequestIdentity,
+  action: "authorization.approved" | "authorization.rejected",
+  requestId: string,
+  reviewCommandId: string,
+  reviewOperationToken: string,
+  details: Record<string, unknown>,
+  occurredAt: string
+): D1PreparedStatement {
+  const status = action === "authorization.approved" ? "approved" : "rejected";
+  return db.prepare(
+    `INSERT INTO audit_events (
+      audit_id, tenant_id, actor_id, action, resource_type, resource_id, details_json, occurred_at
+    ) SELECT ?, ?, ?, ?, 'authorization-request', ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM authorization_requests
+        WHERE request_id = ? AND status = ? AND review_command_id = ?
+      ) AND EXISTS (
+        SELECT 1 FROM idempotency_keys
+        WHERE tenant_id = 'platform' AND operation = 'authorization.review-target'
+          AND idempotency_key = ? AND resource_id = ?
+      )`
+  ).bind(
+    `audit-${crypto.randomUUID()}`, identity.tenantId, identity.actorId, action, requestId,
+    JSON.stringify(details), occurredAt, requestId, status, reviewCommandId,
+    requestId, reviewOperationToken
+  );
+}
+
+function reviewTargetClaimInsert(
+  db: D1Database,
+  reviewerTenantId: string,
+  requestId: string,
+  commandId: string,
+  resourceBinding: string,
+  operationToken: string,
+  createdAt: string
+): D1PreparedStatement {
+  return db.prepare(CLAIM_AUTHORIZATION_REVIEW_TARGET_SQL).bind(
+    requestId, operationToken, createdAt, requestId,
+    reviewerTenantId, commandId, resourceBinding
+  );
+}
+
+function guardedReviewIdempotencyInsert(
+  db: D1Database,
+  tenantId: string,
+  commandId: string,
+  resourceBinding: string,
+  requestId: string,
+  reviewOperationToken: string,
+  createdAt: string
+): D1PreparedStatement {
+  return db.prepare(BIND_AUTHORIZATION_REVIEW_COMMAND_SQL).bind(
+    tenantId, commandId, resourceBinding, createdAt, requestId, reviewOperationToken
+  );
 }
 
 function auditInsert(
@@ -1528,7 +1779,7 @@ function auditInsert(
     );
 }
 
-function ledgerInsert(
+function guardedInferenceLedgerInsert(
   db: D1Database,
   tenantId: string,
   accountId: string,
@@ -1536,15 +1787,41 @@ function ledgerInsert(
   entryType: LedgerEntryView["entryType"],
   direction: LedgerEntryView["direction"],
   amountMicros: string,
-  createdAt: string
+  createdAt: string,
+  evidenceDigest: string
 ): D1PreparedStatement {
-  return db
-    .prepare(
-      `INSERT INTO ledger_entries (
-        entry_id, tenant_id, account_id, job_id, entry_type, direction, amount_micros, currency, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CNY', ?)`
-    )
-    .bind(`ledger-${crypto.randomUUID()}`, tenantId, accountId, jobId, entryType, direction, amountMicros, createdAt);
+  return db.prepare(
+    `INSERT OR IGNORE INTO ledger_entries (
+      entry_id, tenant_id, account_id, job_id, entry_type, direction, amount_micros, currency, created_at
+    ) SELECT ?, ?, ?, ?, ?, ?, ?, 'CNY', ?
+      WHERE EXISTS (
+        SELECT 1 FROM service_evidence WHERE job_id = ? AND evidence_digest = ?
+      )`
+  ).bind(
+    `ledger-${crypto.randomUUID()}`, tenantId, accountId, jobId, entryType, direction,
+    amountMicros, createdAt, jobId, evidenceDigest
+  );
+}
+
+function guardedInferenceAuditInsert(
+  db: D1Database,
+  identity: RequestIdentity,
+  jobId: string,
+  details: Record<string, unknown>,
+  occurredAt: string,
+  evidenceDigest: string
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO audit_events (
+      audit_id, tenant_id, actor_id, action, resource_type, resource_id, details_json, occurred_at
+    ) SELECT ?, ?, ?, 'inference.completed', 'inference-job', ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM service_evidence WHERE job_id = ? AND evidence_digest = ?
+      )`
+  ).bind(
+    `audit-${crypto.randomUUID()}`, identity.tenantId, identity.actorId, jobId,
+    JSON.stringify(details), occurredAt, jobId, evidenceDigest
+  );
 }
 
 function idempotencyInsert(
@@ -1607,11 +1884,10 @@ function validateAuthorizationInput(input: CreateAuthorizationRequest): void {
   assertFutureTimestamp(input.validUntil, "validUntil");
   if (
     typeof input.gatewayBearerToken !== "string" ||
-    input.gatewayBearerToken.length < 32 ||
-    input.gatewayBearerToken.length > 4_096 ||
-    input.gatewayBearerToken.trim() !== input.gatewayBearerToken
+    !/^[A-Za-z0-9_-]{43,512}$/.test(input.gatewayBearerToken) ||
+    new Set(input.gatewayBearerToken).size < 16
   ) {
-    throw new ApiError("INVALID_REQUEST", "gatewayBearerToken 必须是 32 到 4096 字符且不能包含首尾空格。", 400);
+    throw new ApiError("INVALID_REQUEST", "gatewayBearerToken 必须是至少 256 bit 的高熵 base64url 令牌。", 400);
   }
 }
 
@@ -1703,8 +1979,8 @@ function assertPositiveIntegerString(value: unknown, label: string): asserts val
 function assertFutureTimestamp(value: unknown, label: string): Date {
   if (typeof value !== "string" || !value.endsWith("Z")) throw new ApiError("INVALID_REQUEST", `${label} 必须是 UTC 时间。`, 400);
   const timestamp = new Date(value);
-  if (!Number.isFinite(timestamp.getTime()) || timestamp.getTime() <= Date.now() + 60_000) {
-    throw new ApiError("INVALID_REQUEST", `${label} 必须至少晚于当前时间一分钟。`, 400);
+  if (!isAuthorizationValidityAllowed(value, Date.now())) {
+    throw new ApiError("INVALID_REQUEST", `${label} 必须晚于当前时间一分钟且不超过 90 天。`, 400);
   }
   return timestamp;
 }

@@ -33,6 +33,7 @@ async function initializeSchema(): Promise<void> {
   const statements = SCHEMA_STATEMENTS.map((statement) => db.prepare(statement));
   await db.batch(statements);
   await ensureRuntimeColumns(db);
+  await db.batch(POST_COLUMN_SCHEMA_STATEMENTS.map((statement) => db.prepare(statement)));
   await db.prepare("PRAGMA optimize").run();
 }
 
@@ -120,7 +121,51 @@ const RUNTIME_COLUMN_MIGRATIONS = [
     table: "service_evidence",
     column: "digest_version",
     sql: "ALTER TABLE `service_evidence` ADD `digest_version` integer DEFAULT 1 NOT NULL"
+  },
+  {
+    table: "authorization_requests",
+    column: "gateway_token_digest_version",
+    sql: "ALTER TABLE `authorization_requests` ADD `gateway_token_digest_version` integer DEFAULT 1 NOT NULL"
+  },
+  {
+    table: "authorization_requests",
+    column: "review_command_id",
+    sql: "ALTER TABLE `authorization_requests` ADD `review_command_id` text"
+  },
+  {
+    table: "marketplace_events",
+    column: "schema_version",
+    sql: "ALTER TABLE `marketplace_events` ADD `schema_version` integer DEFAULT 1 NOT NULL"
+  },
+  {
+    table: "inference_jobs",
+    column: "reserved_charge_micros",
+    sql: "ALTER TABLE `inference_jobs` ADD `reserved_charge_micros` text DEFAULT '0' NOT NULL"
+  },
+  {
+    table: "inference_jobs",
+    column: "reservation_expires_at",
+    sql: "ALTER TABLE `inference_jobs` ADD `reservation_expires_at` text"
+  },
+  {
+    table: "artifact_chunks",
+    column: "upload_status",
+    sql: "ALTER TABLE `artifact_chunks` ADD `upload_status` text DEFAULT 'ready' NOT NULL"
+  },
+  {
+    table: "artifact_tasks",
+    column: "cancellation_requested_at",
+    sql: "ALTER TABLE `artifact_tasks` ADD `cancellation_requested_at` text"
+  },
+  {
+    table: "artifact_tasks",
+    column: "execution_deadline_at",
+    sql: "ALTER TABLE `artifact_tasks` ADD `execution_deadline_at` text"
   }
+] as const;
+
+const POST_COLUMN_SCHEMA_STATEMENTS = [
+  "CREATE INDEX IF NOT EXISTS idx_authorization_requests_credential_status ON authorization_requests (gateway_token_digest_version, gateway_token_digest, status, valid_until)"
 ] as const;
 
 const SCHEMA_STATEMENTS = [
@@ -168,10 +213,12 @@ const SCHEMA_STATEMENTS = [
     encrypted_gateway_token TEXT NOT NULL,
     gateway_token_iv TEXT NOT NULL,
     gateway_token_digest TEXT,
+    gateway_token_digest_version INTEGER NOT NULL DEFAULT 1,
     encryption_key_version INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
     review_note TEXT,
     reviewed_by TEXT,
+    review_command_id TEXT,
     reviewed_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -212,6 +259,7 @@ const SCHEMA_STATEMENTS = [
     aggregate_id TEXT NOT NULL,
     aggregate_version INTEGER NOT NULL,
     event_type TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
     payload_json TEXT NOT NULL,
     occurred_at TEXT NOT NULL
   )`,
@@ -230,6 +278,8 @@ const SCHEMA_STATEMENTS = [
     prompt_digest TEXT NOT NULL,
     digest_version INTEGER NOT NULL DEFAULT 1,
     max_output_tokens INTEGER NOT NULL,
+    reserved_charge_micros TEXT NOT NULL DEFAULT '0',
+    reservation_expires_at TEXT,
     status TEXT NOT NULL CHECK (status IN ('reserved', 'running', 'completed', 'failed')),
     provider_request_id TEXT,
     input_tokens INTEGER,
@@ -303,6 +353,7 @@ const SCHEMA_STATEMENTS = [
   )`,
   "CREATE INDEX IF NOT EXISTS idx_ledger_entries_tenant_created ON ledger_entries (tenant_id, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_ledger_entries_job_id ON ledger_entries (job_id)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_entries_job_effect ON ledger_entries (job_id, entry_type) WHERE job_id IS NOT NULL AND entry_type IN ('inference-debit', 'supplier-credit', 'platform-fee')",
   `CREATE TABLE IF NOT EXISTS audit_events (
     audit_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -359,10 +410,23 @@ const SCHEMA_STATEMENTS = [
     ciphertext_sha256 TEXT NOT NULL,
     storage_key TEXT NOT NULL,
     iv TEXT NOT NULL,
+    upload_status TEXT NOT NULL DEFAULT 'ready' CHECK (upload_status IN ('pending', 'deleting', 'ready')),
     uploaded_at TEXT NOT NULL
   )`,
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_artifact_chunks_part ON artifact_chunks (artifact_id, part_number)",
   "CREATE INDEX IF NOT EXISTS idx_artifact_chunks_tenant_artifact ON artifact_chunks (tenant_id, artifact_id)",
+  `CREATE TABLE IF NOT EXISTS artifact_object_deletions (
+    storage_key TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    next_attempt_at TEXT NOT NULL,
+    retain_until TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_artifact_object_deletions_due ON artifact_object_deletions (next_attempt_at, retain_until)",
+  "CREATE INDEX IF NOT EXISTS idx_artifact_object_deletions_artifact ON artifact_object_deletions (tenant_id, artifact_id)",
   `CREATE TABLE IF NOT EXISTS supplier_artifact_workers (
     supplier_tenant_id TEXT NOT NULL,
     worker_id TEXT NOT NULL,
@@ -403,6 +467,7 @@ const SCHEMA_STATEMENTS = [
     worker_id TEXT,
     lease_digest TEXT,
     lease_expires_at TEXT,
+    execution_deadline_at TEXT,
     input_tokens INTEGER,
     output_tokens INTEGER,
     total_tokens INTEGER,
@@ -411,6 +476,7 @@ const SCHEMA_STATEMENTS = [
     output_iv TEXT,
     output_expires_at TEXT,
     content_purged_at TEXT,
+    cancellation_requested_at TEXT,
     error_code TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
@@ -464,5 +530,6 @@ const SCHEMA_STATEMENTS = [
     nonce TEXT NOT NULL,
     expires_at TEXT NOT NULL
   )`,
-  "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_request_nonces_unique ON agent_request_nonces (credential_digest, nonce)"
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_request_nonces_unique ON agent_request_nonces (credential_digest, nonce)",
+  "CREATE INDEX IF NOT EXISTS idx_agent_request_nonces_expires ON agent_request_nonces (expires_at)"
 ] as const;

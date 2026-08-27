@@ -6,8 +6,8 @@ import { SupplierAgentError, type SupplierAgentSetupInput } from "./types.js";
 
 export interface SupplierAgentManagementServer {
   server: Server;
-  sessionToken: string;
   url: string;
+  launchUrl: string;
 }
 
 export async function startSupplierAgentManagementServer(
@@ -16,6 +16,7 @@ export async function startSupplierAgentManagementServer(
   onShutdown: () => void
 ): Promise<SupplierAgentManagementServer> {
   const sessionToken = randomBytes(32).toString("base64url");
+  let bootstrapToken: string | undefined = randomBytes(32).toString("base64url");
   const url = `http://127.0.0.1:${port}`;
   const passphraseAttempts = new PassphraseAttemptGate();
   const server = createServer(async (request, response) => {
@@ -23,7 +24,18 @@ export async function startSupplierAgentManagementServer(
       validateHost(request, port);
       const parsed = new URL(request.url ?? "/", url);
       if (request.method === "GET" && parsed.pathname === "/" && !parsed.search) {
-        return sendHtml(response, renderSupplierAgentUi(randomBytes(18).toString("base64url")), sessionToken);
+        return sendHtml(response, renderSupplierAgentUi(randomBytes(18).toString("base64url")));
+      }
+      if (request.method === "POST" && parsed.pathname === "/api/bootstrap" && !parsed.search) {
+        requireOrigin(request, url);
+        const body = await readJson(request);
+        assertExactBody(body, ["bootstrapToken"]);
+        const candidate = (body as { bootstrapToken?: unknown }).bootstrapToken;
+        if (typeof candidate !== "string" || !bootstrapToken || !safeSecretEqual(candidate, bootstrapToken)) {
+          throw new SupplierAgentError("SESSION_INVALID", "本地管理启动凭据无效。" );
+        }
+        bootstrapToken = undefined;
+        return sendSession(response, sessionToken);
       }
       requireSession(request, sessionToken);
       if (request.method === "GET" && parsed.pathname === "/api/status" && !parsed.search) {
@@ -60,7 +72,7 @@ export async function startSupplierAgentManagementServer(
       return sendError(response, 404, "INVALID_REQUEST", "本地管理接口不存在。");
     } catch (error) {
       if (error instanceof SupplierAgentError) {
-        const status = error.code === "SESSION_INVALID" ? 401 : error.code === "ORIGIN_REJECTED" ? 403 : error.code === "RATE_LIMITED" ? 429 : 400;
+        const status = error.code === "SESSION_INVALID" ? 401 : error.code === "ORIGIN_REJECTED" ? 403 : error.code === "RATE_LIMITED" ? 429 : error.code === "ALREADY_CONFIGURED" ? 409 : 400;
         return sendError(response, status, error.code, error.message);
       }
       const message = error instanceof Error && error.message === "PAYLOAD_TOO_LARGE" ? "请求体超过本地管理限制。" : "本地供应客户端发生内部错误。";
@@ -74,7 +86,7 @@ export async function startSupplierAgentManagementServer(
       resolve();
     });
   });
-  return { server, sessionToken, url };
+  return { server, url, launchUrl: `${url}/#bootstrap=${bootstrapToken}` };
 }
 
 export class PassphraseAttemptGate {
@@ -130,9 +142,13 @@ function validateHost(request: IncomingMessage, port: number): void {
 function requireSession(request: IncomingMessage, expected: string): void {
   const received = readSessionCookie(request.headers.cookie);
   if (!received) throw new SupplierAgentError("SESSION_INVALID", "本地管理会话无效。");
+  if (!safeSecretEqual(received, expected)) throw new SupplierAgentError("SESSION_INVALID", "本地管理会话无效。");
+}
+
+function safeSecretEqual(received: string, expected: string): boolean {
   const left = Buffer.from(received);
   const right = Buffer.from(expected);
-  if (left.length !== right.length || !timingSafeEqual(left, right)) throw new SupplierAgentError("SESSION_INVALID", "本地管理会话无效。");
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 function readSessionCookie(header: string | undefined): string | undefined {
@@ -177,15 +193,24 @@ function assertExactBody(value: unknown, keys: readonly string[]): void {
   }
 }
 
-function sendHtml(response: ServerResponse, html: string, sessionToken: string): void {
+function sendHtml(response: ServerResponse, html: string): void {
   const nonce = html.match(/nonce="([A-Za-z0-9_-]+)"/)?.[1];
   response.writeHead(200, securityHeaders({
     "content-type": "text/html; charset=utf-8",
     "content-length": String(Buffer.byteLength(html)),
-    "set-cookie": `gongsuanyun_agent_session=${sessionToken}; HttpOnly; SameSite=Strict; Path=/`,
     "content-security-policy": `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
   }));
   response.end(html);
+}
+
+function sendSession(response: ServerResponse, sessionToken: string): void {
+  const encoded = JSON.stringify({ ok: true });
+  response.writeHead(200, securityHeaders({
+    "content-type": "application/json; charset=utf-8",
+    "content-length": String(Buffer.byteLength(encoded)),
+    "set-cookie": `gongsuanyun_agent_session=${sessionToken}; HttpOnly; SameSite=Strict; Path=/`
+  }));
+  response.end(encoded);
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {

@@ -5,3 +5,11 @@ dist/
 *.tsbuildinfo
 *.log
 **/outputs/
+.env
+.env.*
+!.env.example
+!**/.env.example
+.dev.vars
+.dev.vars.*
+.wrangler/
+**/.wrangler/

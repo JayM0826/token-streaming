@@ -8,6 +8,9 @@ services:
     environment:
       SUPPLIER_NODE_BIND_HOST: 0.0.0.0
       SUPPLIER_NODE_PORT: 8789
+      SUPPLIER_NODE_REPLAY_JOURNAL_PATH: /var/lib/gongsuanyun/replay-v1.jsonl
+    volumes:
+      - supplier_node_state:/var/lib/gongsuanyun
     expose:
       - "8789"
     read_only: true
@@ -42,5 +45,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  supplier_node_state:
   caddy_data:
   caddy_config:

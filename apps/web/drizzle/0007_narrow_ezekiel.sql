@@ -1,0 +1,2 @@
+CREATE INDEX `idx_agent_request_nonces_expires` ON `agent_request_nonces` (`expires_at`);--> statement-breakpoint
+CREATE INDEX `idx_authorization_requests_credential_status` ON `authorization_requests` (`gateway_token_digest_version`,`gateway_token_digest`,`status`,`valid_until`);

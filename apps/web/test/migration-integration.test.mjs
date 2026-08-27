@@ -14,7 +14,7 @@ const wranglerEntrypoint = path.join(webRoot, "node_modules", "wrangler", "bin",
 // Wrangler starts a fresh local Worker runtime for every migration and query.
 // Cold starts on Windows CI can push the complete upgrade rehearsal beyond one
 // minute even though each individual invocation remains bounded to 30 seconds.
-test("D1 migrations preserve legacy content rows and install privacy controls", { timeout: 180_000 }, async () => {
+test("D1 migrations preserve legacy rows and install runtime safeguards", { timeout: 180_000 }, async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "gongsuanyun-migration-test-"));
   const stateRoot = path.join(tempRoot, "state");
   const configPath = path.join(tempRoot, "wrangler.jsonc");
@@ -40,12 +40,15 @@ test("D1 migrations preserve legacy content rows and install privacy controls", 
     const migrations = (await readdir(path.join(webRoot, "drizzle")))
       .filter((name) => /^\d{4}_.+\.sql$/.test(name))
       .sort();
-    assert.deepEqual(migrations.map((name) => name.slice(0, 4)), ["0000", "0001", "0002", "0003", "0004", "0005"]);
+    assert.deepEqual(
+      migrations.map((name) => name.slice(0, 4)),
+      ["0000", "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010"]
+    );
     const migrationSources = await Promise.all(migrations.map((name) => readMigration(name)));
     const expectedTables = migrationSources
       .flatMap((sql) => [...sql.matchAll(/CREATE TABLE `([^`]+)`/g)].map((match) => match[1]))
       .sort();
-    assert.equal(expectedTables.length, 19);
+    assert.equal(expectedTables.length, 20);
 
     for (const migration of migrations.slice(0, 4)) {
       await runWrangler(configPath, stateRoot, ["--file", path.join(webRoot, "drizzle", migration)]);
@@ -98,6 +101,75 @@ test("D1 migrations preserve legacy content rows and install privacy controls", 
       digestVersion && { type: digestVersion.type, notnull: digestVersion.notnull, default: digestVersion.dflt_value },
       { type: "INTEGER", notnull: 1, default: "1" }
     );
+
+    const inferenceColumns = await query(configPath, stateRoot, "PRAGMA table_info(inference_jobs);");
+    assertColumn(inferenceColumns, "reserved_charge_micros", { type: "TEXT", notnull: 1, default: "'0'" });
+    assertColumn(inferenceColumns, "reservation_expires_at", { type: "TEXT", notnull: 0, default: null });
+    const artifactChunkColumns = await query(configPath, stateRoot, "PRAGMA table_info(artifact_chunks);");
+    assertColumn(artifactChunkColumns, "upload_status", { type: "TEXT", notnull: 1, default: "'ready'" });
+    const taskColumns = await query(configPath, stateRoot, "PRAGMA table_info(artifact_tasks);");
+    assertColumn(taskColumns, "cancellation_requested_at", { type: "TEXT", notnull: 0, default: null });
+    assertColumn(taskColumns, "execution_deadline_at", { type: "TEXT", notnull: 0, default: null });
+    const eventColumns = await query(configPath, stateRoot, "PRAGMA table_info(marketplace_events);");
+    assertColumn(eventColumns, "schema_version", { type: "INTEGER", notnull: 1, default: "1" });
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT event_id, schema_version, payload_json FROM marketplace_events
+      WHERE event_id = 'legacy-event';
+    `), [{ event_id: "legacy-event", schema_version: 1, payload_json: "{\"legacy\":true}" }]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT status, reservation_expires_at, error_code FROM inference_jobs
+      WHERE job_id = 'legacy-running';
+    `), [{ status: "failed", reservation_expires_at: null, error_code: "EXECUTION_MIGRATED" }]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT status, lease_digest, lease_expires_at, execution_deadline_at, error_code,
+        instruction_ciphertext, instruction_iv,
+        completed_at IS NOT NULL AS has_completed_at
+      FROM artifact_tasks WHERE task_id = 'legacy-running-task';
+    `), [{
+      status: "failed",
+      lease_digest: null,
+      lease_expires_at: null,
+      execution_deadline_at: null,
+      error_code: "EXECUTION_MIGRATED",
+      instruction_ciphertext: "",
+      instruction_iv: "",
+      has_completed_at: 1
+    }]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT email, display_name FROM users WHERE user_id = 'legacy-user';
+    `), [{ email: "redacted@identity.invalid", display_name: "平台成员" }]);
+
+    const hardeningIndexes = await query(configPath, stateRoot, `
+      SELECT name FROM sqlite_master WHERE type = 'index'
+        AND name IN ('idx_authorization_requests_credential_status', 'idx_agent_request_nonces_expires')
+      ORDER BY name;
+    `);
+    assert.deepEqual(hardeningIndexes, [
+      { name: "idx_agent_request_nonces_expires" },
+      { name: "idx_authorization_requests_credential_status" }
+    ]);
+
+    const deletionColumns = await query(configPath, stateRoot, "PRAGMA table_info(artifact_object_deletions);");
+    assertColumn(deletionColumns, "storage_key", { type: "TEXT", notnull: 1, default: null });
+    assertColumn(deletionColumns, "attempts", { type: "INTEGER", notnull: 1, default: "0" });
+    const deletionIndexes = await query(configPath, stateRoot, `
+      SELECT name FROM sqlite_master WHERE type = 'index'
+        AND name IN ('idx_artifact_object_deletions_due', 'idx_artifact_object_deletions_artifact')
+      ORDER BY name;
+    `);
+    assert.deepEqual(deletionIndexes, [
+      { name: "idx_artifact_object_deletions_artifact" },
+      { name: "idx_artifact_object_deletions_due" }
+    ]);
+
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT name, "unique" AS is_unique, partial
+      FROM pragma_index_list('ledger_entries')
+      WHERE name = 'idx_ledger_entries_job_effect';
+    `), [{ name: "idx_ledger_entries_job_effect", is_unique: 1, partial: 1 }]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT name FROM pragma_index_info('idx_ledger_entries_job_effect') ORDER BY seqno;
+    `), [{ name: "job_id" }, { name: "entry_type" }]);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -133,13 +205,38 @@ async function readMigration(name) {
   return readFile(path.join(webRoot, "drizzle", name), "utf8");
 }
 
+function assertColumn(columns, name, expected) {
+  const column = columns.find((entry) => entry.name === name);
+  assert.deepEqual(
+    column && { type: column.type, notnull: column.notnull, default: column.dflt_value },
+    expected
+  );
+}
+
 const legacyFixtures = `
+  INSERT INTO users (user_id, email, display_name, created_at, updated_at)
+  VALUES ('legacy-user', 'legacy@example.test', 'Legacy User',
+    '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z');
+  INSERT INTO marketplace_events (
+    event_id, tenant_id, actor_id, causation_id, aggregate_type, aggregate_id,
+    aggregate_version, event_type, payload_json, occurred_at
+  ) VALUES (
+    'legacy-event', 'legacy-tenant', 'legacy-actor', 'legacy-cause', 'supplier', 'legacy-supplier',
+    1, 'LegacyFixture', '{"legacy":true}', '2026-08-25T00:00:00.000Z'
+  );
   INSERT INTO inference_jobs (
     job_id, buyer_tenant_id, supplier_tenant_id, offer_id, idempotency_key, model,
     data_class, prompt_digest, max_output_tokens, status, created_at
   ) VALUES (
     'legacy-inference', 'buyer-legacy', 'supplier-legacy', 'offer-legacy', 'inference-idempotency', 'model-legacy',
     'standard', 'raw-sha256-legacy', 64, 'completed', '2026-08-25T00:00:00.000Z'
+  );
+  INSERT INTO inference_jobs (
+    job_id, buyer_tenant_id, supplier_tenant_id, offer_id, idempotency_key, model,
+    data_class, prompt_digest, max_output_tokens, status, created_at
+  ) VALUES (
+    'legacy-running', 'buyer-legacy', 'supplier-legacy', 'offer-legacy', 'running-idempotency', 'model-legacy',
+    'standard', 'raw-sha256-running', 64, 'running', '2026-08-25T00:00:00.000Z'
   );
   INSERT INTO artifacts (
     artifact_id, tenant_id, file_name, media_type, size_bytes, chunk_size_bytes, chunk_count,
@@ -156,5 +253,16 @@ const legacyFixtures = `
     'legacy-task', 'buyer-legacy', 'supplier-legacy', 'offer-legacy', 'authorization-legacy', 'legacy-artifact',
     'artifact-idempotency', 'model-legacy', 'standard', 'raw-instruction-legacy', 'ciphertext-legacy', 'iv-legacy',
     64, 256, '1000', 'completed', '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z'
+  );
+  INSERT INTO artifact_tasks (
+    task_id, buyer_tenant_id, supplier_tenant_id, offer_id, authorization_request_id, artifact_id,
+    idempotency_key, model, data_class, instruction_digest, instruction_ciphertext, instruction_iv,
+    max_output_tokens, max_total_tokens, reserved_charge_micros, status, worker_id, lease_digest,
+    lease_expires_at, started_at, created_at, updated_at
+  ) VALUES (
+    'legacy-running-task', 'buyer-legacy', 'supplier-legacy', 'offer-legacy', 'authorization-legacy', 'legacy-artifact',
+    'running-artifact-idempotency', 'model-legacy', 'standard', 'raw-running-instruction', 'ciphertext-running', 'iv-running',
+    64, 256, '1000', 'running', 'legacy-worker', 'legacy-lease', '2026-08-26T00:00:00.000Z',
+    '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z'
   );
 `;

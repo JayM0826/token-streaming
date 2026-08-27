@@ -27,5 +27,6 @@ rules:
   - Keep signature canonicalization deterministic and free of runtime dependencies.
   - Bind every billable response to canonical execution evidence covering Provider, requested and served model, request ID, input/output digests, usage, and completion time.
   - Keep large-file bytes out of JSON contracts; publish only bounded artifact manifests, chunk descriptors, leases, progress, and signed execution evidence.
+  - Represent artifact-task cancellation explicitly and keep leased cancellation two-phase so reservations cannot release before execution is terminal.
   - Make supplier plaintext visibility, privacy mode, retention summary, and buyer-owned purge operations explicit in versioned contracts.
 

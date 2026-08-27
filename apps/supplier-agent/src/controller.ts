@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Server } from "node:http";
+import { join } from "node:path";
 import {
   SupplierNodeRuntime,
   createConfiguredProviderAdapter,
@@ -32,6 +33,7 @@ export class SupplierAgentController {
   private artifactWorker: SupplierArtifactWorker | undefined;
   private artifactWorkerStatus: SupplierArtifactWorkerStatus = emptyArtifactWorkerStatus();
   private metrics: SupplierAgentMetrics = emptyMetrics();
+  private setupInFlight = false;
 
   constructor(
     readonly store: SupplierAgentStore,
@@ -43,30 +45,39 @@ export class SupplierAgentController {
   }
 
   async setup(input: SupplierAgentSetupInput): Promise<SupplierConnectionDetails> {
-    if (!isRecord(input)) invalid("设置请求必须是对象。");
-    assertExactKeys(input, ["profile", "upstreamApiKey", "passphrase"], ["gatewayToken"]);
-    validatePassphrase(input.passphrase);
-    const prior = this.profile;
-    const profile = createSupplierAgentProfile(input.profile, prior);
-    const secrets = {
-      gatewayToken: normalizeGatewayToken(input.gatewayToken),
-      upstreamApiKey: requiredSecret(input.upstreamApiKey, "Provider API Key", 8)
-    };
-    const config = buildNodeConfig(profile, secrets);
-    const vault = await encryptSupplierAgentVault(secrets, input.passphrase);
-    await this.stopNode();
-    await this.store.write(profile, vault);
-    this.profile = profile;
-    await this.startNode(config, secrets);
-    return connectionDetailsFor(profile, secrets.gatewayToken);
+    if (this.setupInFlight) {
+      throw new SupplierAgentError("ALREADY_CONFIGURED", "供应客户端设置正在进行或已经完成。");
+    }
+    this.setupInFlight = true;
+    try {
+      if (this.profile || await this.store.exists()) {
+        throw new SupplierAgentError("ALREADY_CONFIGURED", "已有加密配置；为防止凭据被覆盖，请先使用现有口令解锁。");
+      }
+      if (!isRecord(input)) invalid("设置请求必须是对象。");
+      assertExactKeys(input, ["profile", "upstreamApiKey", "passphrase"], ["gatewayToken"]);
+      validatePassphrase(input.passphrase);
+      const profile = createSupplierAgentProfile(input.profile);
+      const secrets = {
+        gatewayToken: normalizeGatewayToken(input.gatewayToken),
+        upstreamApiKey: requiredSecret(input.upstreamApiKey, "Provider API Key", 8)
+      };
+      const config = buildNodeConfig(profile, secrets, this.store.paths.root);
+      const vault = await encryptSupplierAgentVault(secrets, input.passphrase, profile);
+      await this.store.write(profile, vault);
+      this.profile = profile;
+      await this.startNode(config, secrets);
+      return connectionDetailsFor(profile, secrets.gatewayToken);
+    } finally {
+      this.setupInFlight = false;
+    }
   }
 
   async unlock(passphrase: string): Promise<void> {
     validatePassphrase(passphrase);
     if (!this.profile) throw new SupplierAgentError("NOT_CONFIGURED", "请先完成供应客户端设置。");
-    const secrets = await decryptSupplierAgentVault(await this.store.readVault(), passphrase);
+    const secrets = await decryptSupplierAgentVault(await this.store.readVault(), passphrase, this.profile);
     await this.stopNode();
-    await this.startNode(buildNodeConfig(this.profile, secrets), secrets);
+    await this.startNode(buildNodeConfig(this.profile, secrets, this.store.paths.root), secrets);
   }
 
   async lock(): Promise<void> {
@@ -91,7 +102,7 @@ export class SupplierAgentController {
   async connectionDetails(passphrase: string): Promise<SupplierConnectionDetails> {
     validatePassphrase(passphrase);
     if (!this.profile) throw new SupplierAgentError("NOT_CONFIGURED", "请先完成供应客户端设置。");
-    const verified = await decryptSupplierAgentVault(await this.store.readVault(), passphrase);
+    const verified = await decryptSupplierAgentVault(await this.store.readVault(), passphrase, this.profile);
     return connectionDetailsFor(this.profile, verified.gatewayToken);
   }
 
@@ -179,7 +190,11 @@ export class SupplierAgentController {
   }
 }
 
-function buildNodeConfig(profile: SupplierAgentProfile, secrets: SupplierAgentSecrets): SupplierNodeConfig {
+function buildNodeConfig(
+  profile: SupplierAgentProfile,
+  secrets: SupplierAgentSecrets,
+  stateRoot: string
+): SupplierNodeConfig {
   return loadSupplierNodeConfig({
     SUPPLIER_NODE_BIND_HOST: "127.0.0.1",
     SUPPLIER_NODE_PORT: String(profile.gatewayPort),
@@ -197,7 +212,8 @@ function buildNodeConfig(profile: SupplierAgentProfile, secrets: SupplierAgentSe
     SUPPLIER_NODE_UPSTREAM_PROTOCOL: profile.upstreamProtocol,
     SUPPLIER_NODE_UPSTREAM_BASE_URL: profile.upstreamBaseUrl,
     SUPPLIER_NODE_UPSTREAM_HOST_ALLOWLIST: profile.upstreamHostAllowlist.join(","),
-    SUPPLIER_NODE_UPSTREAM_API_KEY: secrets.upstreamApiKey
+    SUPPLIER_NODE_UPSTREAM_API_KEY: secrets.upstreamApiKey,
+    SUPPLIER_NODE_REPLAY_JOURNAL_PATH: join(stateRoot, "supplier-node-replay-v1.jsonl")
   });
 }
 

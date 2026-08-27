@@ -55,8 +55,7 @@ async function start(): Promise<void> {
   managementServer = await startSupplierAgentManagementServer(controller, port, () => {
     void shutdown().then(() => { process.exitCode = 0; });
   });
-  const launchUrl = `${managementServer.url}/`;
-  openBrowser(launchUrl);
+  openBrowser(managementServer.launchUrl);
   process.stdout.write(`${JSON.stringify({
     event: "supplier-agent.ready",
     version: VERSION,

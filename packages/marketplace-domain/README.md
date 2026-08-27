@@ -18,7 +18,7 @@ Per-job execution-evidence verification compares the purchased Provider and exac
 
 Artifact-task evidence extends the same invariant across a multi-call job: it binds the immutable artifact manifest, whole-content digest, requested and served exact model, aggregate Provider request-ID digest, segment count, output digest, total usage, and completion window. `estimateArtifactMaximumChargeMicros` reserves the buyer-approved full-task token ceiling using integer micros; actual settlement still uses verified aggregate usage and cannot exceed that reservation.
 
-Privacy intent is also headless policy. `parseMarketplacePrivacyMode`, `assertSupplierProcessingAcknowledged`, and `calculateMarketplacePrivacyRetentionMilliseconds` keep accepted modes, explicit plaintext-processing consent, and standard/strict retention calculations consistent across Web and worker hosts.
+Privacy intent is also headless policy. `parseMarketplacePrivacyMode`, `assertSupplierProcessingAcknowledged`, and `calculateMarketplacePrivacyRetentionMilliseconds` keep accepted modes, explicit plaintext-processing consent, and standard/strict retention calculations consistent across Web and worker hosts. `decideArtifactTaskCancellation` is the shared two-phase cancellation state machine: queued work releases immediately, but leased work remains reserved until terminal so cancellation cannot race a billable completion.
 
 ## Security Boundary
 

@@ -7,6 +7,7 @@ import {
   type SupplierGatewayExecutionEvidence
 } from "@token-streaming/protocol";
 import { SupplierNodeError } from "./errors.js";
+import type { PersistentReplayJournal } from "./replay-journal.js";
 
 export interface SignedGatewayCall {
   authorization: string | undefined;
@@ -22,7 +23,8 @@ export class NonceReplayGuard {
 
   constructor(
     private readonly replayWindowMs = 5 * 60_000,
-    private readonly maximumEntries = 10_000
+    private readonly maximumEntries = 10_000,
+    private readonly persistentJournal?: PersistentReplayJournal
   ) {}
 
   verifyAndRecord(nonce: string, timestampMs: number, nowMs: number): void {
@@ -36,6 +38,7 @@ export class NonceReplayGuard {
     if (this.seen.size >= this.maximumEntries) {
       throw new SupplierNodeError("CAPACITY_EXCEEDED", "重放保护容量已满，请稍后重试。", 503, true);
     }
+    this.persistentJournal?.claimNonce(nonce, timestampMs + this.replayWindowMs, nowMs);
     this.seen.set(nonce, timestampMs + this.replayWindowMs);
   }
 

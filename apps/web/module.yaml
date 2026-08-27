@@ -19,6 +19,7 @@ rules:
   - Sign every supplier-node call with the encrypted gateway token, timestamp, nonce, job ID, and exact request-body digest.
   - Require a signed live supplier-node attestation before approving authorization; reject Provider, model, data-class, or capacity mismatches.
   - Verify canonical per-job execution evidence before settlement and atomically persist the evidence with balanced ledger postings.
+  - Reserve buyer funds atomically across synchronous and artifact workloads; settle only from a live reservation and never above its ceiling.
   - Keep the consumer PWA service worker away from authenticated pages, sign-in routes, and API responses.
   - Keep browser components free of pricing, authorization, settlement, and routing decisions.
   - Route server-side supplier and offer invariants through marketplace-domain and explicit runtime policy objects.
@@ -27,11 +28,23 @@ rules:
   - Keep D1 statements tenant-scoped and append financial corrections instead of rewriting ledger history.
   - Reject unapproved capacity, P2/P3 data, private-network gateways, and non-allowlisted production gateway hosts.
   - Keep file bytes out of JSON and D1; store only independently encrypted, tenant-bound chunks in R2 and remove expired bytes with a bounded sweep.
+  - Coordinate R2/D1 chunk writes through pending/ready/deleting states and retain a retryable index until object deletion succeeds.
+  - Before artifact purge attempts R2 deletion, use one D1 batch to enqueue the durable object retry and mark the exact immutable generation (artifact, tenant, part, storage key, upload time) deleting, so no stale ready row can permanently filter the queue.
+  - Bound each purge/retention invocation to one artifact and four immutable generations, and process at most four due deletion-queue keys per round; a 64-generation artifact may require sixteen invocations.
+  - Treat bounded cleanup transitions as resumability controls, not lower-tier D1 compatibility; full maintenance includes schema bootstrap and production requires the Workers Paid 1,000-query-per-invocation quota.
+  - Return retryable HTTP 503 while an explicit purge still has generation metadata or an R2 deletion is unconfirmed; mark the artifact deleted only after every generation row is gone.
+  - Do not treat artifact_tasks.content_purged_at alone as full task purge because output expiry also sets it; require that marker plus empty instruction/output fields, a deleted associated artifact with purge time, and zero chunk generations, and keep task purge reachable after output expiry.
+  - After artifact or task full-purge state is confirmed, make every explicit retry idempotently backfill missing artifact/task completion audits with stable action-resource IDs and no duplicate tenant/action/resource event.
   - Schedule artifact work only to a recently heartbeating Agent whose signed identity, authorization, Provider, exact model, media type, and file-size limit all match.
   - Reserve the full artifact token ceiling, release it only at terminal state, and write verified evidence, usage, and balanced ledger entries in one guarded D1 batch.
+  - Use the headless two-phase cancellation policy: queued work releases immediately, leased work stays reserved until cancellation is terminal.
   - Keep customer job, artifact, filename, instruction, and replayable output views buyer-only; suppliers receive only their leased assignment and aggregate business metrics.
   - Require explicit supplier/upstream plaintext-processing acknowledgement and default the UI to strict retention without claiming end-to-end execution secrecy.
   - Separate credential, replayable-content, artifact, and digest-commitment keys; bind ciphertext and commitments to purpose, tenant, and resource identity.
   - Purge active content and raw manifests without deleting or rewriting append-only ledger, usage, audit, or evidence history.
   - Apply durable tenant/credential rate limits, same-origin mutation checks, and no-store defensive response headers.
+  - Run retention independently through a pre-auth rate-limited, constant-time bearer maintenance endpoint; before cleanup, require all four production key domains to decode as distinct 32-byte values.
+  - Report object-deletion backlog/overdue/oldest/breached state plus unclaimedExpiredArtifacts and pendingArtifactTombstones with independent 24-hour breach counts; threshold all three backlogs, fail on any breach, scrub expired credentials, and never treat scheduler cadence as a hard deletion SLA.
+  - Keep local .env, .dev.vars, and .wrangler state ignored while retaining example templates; production secrets belong in runtime configuration, not repository artifacts.
+  - Persist event schema versions and command guards; concurrency losers must not emit duplicate domain events, audits, or side effects.
   - Exercise schema upgrades against a real temporary D1 database with legacy rows, and keep production bootstrap additive, re-entrant, and safe under Worker-isolate races; source-pattern assertions alone are not migration evidence.

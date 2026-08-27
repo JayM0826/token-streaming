@@ -27,3 +27,4 @@ rules:
   - Reject execution evidence unless Provider, exact model, request, content digests, usage, and completion window match the purchased service.
   - Bind large-file settlement to the immutable artifact manifest, served exact model, aggregate usage, output digest, and signed execution evidence.
   - Require explicit supplier-processing acknowledgement and calculate standard/strict retention through one provider-neutral privacy policy.
+  - Keep artifact cancellation provider-neutral and two-phase; never release a leased task reservation before terminal state.

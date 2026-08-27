@@ -1,0 +1,58 @@
+name: Retention sweep
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: marketplace-retention-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Purge expired marketplace content
+        env:
+          MARKETPLACE_MAINTENANCE_KEY: ${{ secrets.MARKETPLACE_MAINTENANCE_KEY }}
+        run: |
+          test -n "$MARKETPLACE_MAINTENANCE_KEY"
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          http_code="$(curl --silent --show-error \
+            --output "$response_file" --write-out '%{http_code}' \
+            --retry 3 --retry-all-errors --max-time 60 \
+            -X POST \
+            -H "Accept: application/json" \
+            -H "Authorization: Bearer $MARKETPLACE_MAINTENANCE_KEY" \
+            https://gongsuanyun-market.wenzaiyin.chatgpt.site/api/internal/maintenance)"
+          test "$http_code" = "200"
+          python3 - "$response_file" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if payload.get("ok") is not True or not isinstance(payload.get("requestId"), str):
+              raise SystemExit("maintenance response did not confirm success")
+          if int(payload.get("overdueArtifactDeletions", 0)) > 500:
+              raise SystemExit("artifact deletion queue exceeds the monitored overdue threshold")
+          if int(payload.get("artifactDeletionRetentionBreaches", 0)) > 0:
+              raise SystemExit("artifact deletion exceeded its retention deadline")
+          if int(payload.get("unclaimedExpiredArtifacts", 0)) > 500:
+              raise SystemExit("unclaimed expired artifact backlog exceeds the monitored threshold")
+          if int(payload.get("unclaimedArtifactRetentionBreaches", 0)) > 0:
+              raise SystemExit("an expired artifact was not tombstoned within the retry horizon")
+          if int(payload.get("pendingArtifactTombstones", 0)) > 256:
+              raise SystemExit("artifact generation tombstone backlog exceeds the monitored threshold")
+          if int(payload.get("artifactTombstoneRetentionBreaches", 0)) > 0:
+              raise SystemExit("an artifact generation was not tombstoned within the retry horizon")
+          if payload.get("cryptographicConfiguration") != "valid":
+              raise SystemExit("runtime cryptographic configuration was not validated")
+          print(f"retention sweep completed at {payload.get('executedAt', 'unknown')}")
+          PY

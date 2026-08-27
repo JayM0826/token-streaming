@@ -6,6 +6,7 @@ export interface MarketplaceRuntimePolicy {
   maximumInputCharacters: number;
   maximumGatewayResponseBytes: number;
   inferenceRequestsPerMinute: number;
+  inferenceReservationTimeoutSeconds: number;
   standardOutputRetentionHours: number;
   standardArtifactRetentionHours: number;
   strictOutputRetentionMinutes: number;
@@ -13,6 +14,7 @@ export interface MarketplaceRuntimePolicy {
   maximumTenantArtifactBytes: number;
   maximumActiveArtifactTasksPerTenant: number;
   artifactLeaseMinutes: number;
+  artifactMaximumExecutionMinutes: number;
   artifactQueueTimeoutMinutes: number;
   artifactMaximumAttempts: number;
 }
@@ -24,6 +26,7 @@ export function getMarketplaceRuntimePolicy(): MarketplaceRuntimePolicy {
     maximumInputCharacters: 40_000,
     maximumGatewayResponseBytes: 2_000_000,
     inferenceRequestsPerMinute: 5,
+    inferenceReservationTimeoutSeconds: 120,
     standardOutputRetentionHours: 24,
     standardArtifactRetentionHours: 48,
     strictOutputRetentionMinutes: 60,
@@ -31,6 +34,7 @@ export function getMarketplaceRuntimePolicy(): MarketplaceRuntimePolicy {
     maximumTenantArtifactBytes: 512 * 1024 * 1024,
     maximumActiveArtifactTasksPerTenant: 3,
     artifactLeaseMinutes: 5,
+    artifactMaximumExecutionMinutes: 360,
     artifactQueueTimeoutMinutes: 30,
     artifactMaximumAttempts: 3
   };

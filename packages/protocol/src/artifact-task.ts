@@ -23,7 +23,14 @@ export const ARTIFACT_SUPPORTED_MEDIA_TYPES = [
 
 export type ArtifactSupportedMediaType = typeof ARTIFACT_SUPPORTED_MEDIA_TYPES[number];
 export type ArtifactStatus = "uploading" | "ready" | "expired" | "deleted";
-export type ArtifactTaskStatus = "queued" | "claimed" | "running" | "completed" | "failed" | "cancelled";
+export type ArtifactTaskStatus =
+  | "queued"
+  | "claimed"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface ArtifactChunkDescriptor {
   partNumber: number;
@@ -122,6 +129,20 @@ export interface CreateArtifactTaskResponse {
   ok: true;
   requestId: string;
   task: ArtifactTaskView;
+}
+
+export interface CancelArtifactTaskRequest {
+  commandId: string;
+}
+
+export interface CancelArtifactTaskResponse {
+  ok: true;
+  requestId: string;
+  taskId: string;
+  status: "cancelling" | "cancelled";
+  reservationStatus: "held" | "released";
+  releasedReservationMicros: string;
+  artifactRetention: "retained" | "purge-scheduled";
 }
 
 export interface SupplierArtifactWorkerClaimRequest {

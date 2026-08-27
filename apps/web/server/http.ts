@@ -1,14 +1,21 @@
 import type { MarketplaceApiErrorBody, MarketplaceApiErrorCode } from "@token-streaming/protocol";
 
 export class ApiError extends Error {
+  readonly code: MarketplaceApiErrorCode;
+  readonly status: number;
+  readonly retryable: boolean;
+
   constructor(
-    readonly code: MarketplaceApiErrorCode,
+    code: MarketplaceApiErrorCode,
     message: string,
-    readonly status: number,
-    readonly retryable = false
+    status: number,
+    retryable = false
   ) {
     super(message);
     this.name = "ApiError";
+    this.code = code;
+    this.status = status;
+    this.retryable = retryable;
   }
 }
 
@@ -21,15 +28,44 @@ export async function readJson<T>(request: Request, maximumBytes = 64_000): Prom
   if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
     throw new ApiError("INVALID_REQUEST", "请求内容超过大小限制。", 413);
   }
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > maximumBytes) {
-    throw new ApiError("INVALID_REQUEST", "请求内容超过大小限制。", 413);
-  }
+  const text = await readBoundedText(request, maximumBytes, () =>
+    new ApiError("INVALID_REQUEST", "请求内容超过大小限制。", 413)
+  );
   try {
     return JSON.parse(text) as T;
   } catch {
     throw new ApiError("INVALID_REQUEST", "请求 JSON 无法解析。", 400);
   }
+}
+
+export async function readBoundedText(
+  source: Request | Response,
+  maximumBytes: number,
+  tooLarge: () => Error
+): Promise<string> {
+  const declaredLength = Number(source.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) throw tooLarge();
+  if (!source.body) return "";
+  const reader = source.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 export function assertSameOrigin(request: Request): void {

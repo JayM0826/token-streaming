@@ -19,11 +19,24 @@ test("customer content views remain buyer-only", async () => {
 
 test("active content purge is tenant-bound and leaves immutable evidence outside its deletes", async () => {
   const privacy = await source("server/privacy-service.ts");
+  const privacyInvariants = await source("server/privacy-invariants.ts");
+  const storageInvariants = await source("server/artifact-storage-invariants.ts");
 
   assert.match(privacy, /FROM inference_jobs WHERE job_id = \? AND buyer_tenant_id = \?/);
   assert.match(privacy, /FROM artifacts WHERE artifact_id = \? AND tenant_id = \?/);
-  assert.match(privacy, /FROM artifact_tasks WHERE task_id = \? AND buyer_tenant_id = \?/);
-  assert.match(privacy, /DELETE FROM artifact_chunks WHERE artifact_id = \? AND tenant_id = \?/);
+  assert.match(privacy, /SELECT_ARTIFACT_TASK_PURGE_STATE_SQL/);
+  assert.match(privacyInvariants, /JOIN artifacts a ON a\.artifact_id = t\.artifact_id AND a\.tenant_id = t\.buyer_tenant_id/);
+  assert.match(privacyInvariants, /full_content_purged_at/);
+  assert.match(privacyInvariants, /a\.status = 'deleted'/);
+  assert.match(privacyInvariants, /NOT EXISTS \([\s\S]*?FROM artifact_chunks/);
+  assert.match(
+    privacy,
+    /if \(row\.full_content_purged_at\) \{[\s\S]*?idempotentAuditInsert\([\s\S]*?return row\.full_content_purged_at/
+  );
+  assert.match(privacy, /IDEMPOTENT_CONTENT_PURGE_AUDIT_SQL/);
+  assert.match(privacyInvariants, /INSERT OR IGNORE INTO audit_events[\s\S]*?WHERE NOT EXISTS/);
+  assert.match(privacy, /DELETE_ARTIFACT_CHUNK_GENERATION_SQL/);
+  assert.match(storageInvariants, /DELETE FROM artifact_chunks WHERE artifact_id = \? AND tenant_id = \?/);
   assert.doesNotMatch(privacy, /DELETE FROM (ledger_entries|usage_records|service_evidence|artifact_task_evidence|audit_events)/);
 });
 
@@ -46,13 +59,19 @@ test("persisted content digests are keyed commitments and raw file manifests are
   const artifacts = await source("server/artifact-service.ts");
   const worker = await source("server/artifact-worker-service.ts");
   const privacy = await source("server/privacy-service.ts");
+  const financial = await source("server/financial-invariants.ts");
+  const storage = await source("server/artifact-storage-invariants.ts");
 
-  assert.match(marketplace, /prompt_digest, digest_version[\s\S]*?inputCommitment\.digest[\s\S]*?inputCommitment\.version/);
+  assert.match(financial, /prompt_digest, digest_version[\s\S]*?reserved_charge_micros/);
+  assert.match(marketplace, /inputCommitment\.digest,[\s\S]*?inputCommitment\.version,[\s\S]*?input\.maxOutputTokens/);
   assert.match(marketplace, /inputCommitment\.digest,[\s\S]*?outputCommitment\.digest,[\s\S]*?inputCommitment\.version/);
   assert.match(artifacts, /instructionCommitment\.digest, instructionCommitment\.version/);
+  assert.match(artifacts, /manifestCommitment: manifestCommitment\.digest/);
+  assert.doesNotMatch(artifacts, /artifact\.upload-completed[\s\S]{0,200}\{ manifestSha256 \}/);
   assert.match(worker, /manifestCommitment\.digest, contentCommitment\.digest, outputCommitment\.digest/);
-  assert.match(artifacts, /file_name = 'deleted-artifact', manifest_sha256 = NULL/);
-  assert.match(privacy, /file_name = 'deleted-artifact', manifest_sha256 = NULL/);
+  assert.match(storage, /file_name = 'deleted-artifact', manifest_sha256 = NULL/);
+  assert.match(artifacts, /FINALIZE_ARTIFACT_PURGE_SQL/);
+  assert.match(privacy, /FINALIZE_ARTIFACT_PURGE_SQL/);
 });
 
 test("authenticated browser mutations enforce same-origin CSRF checks", async () => {
@@ -61,6 +80,7 @@ test("authenticated browser mutations enforce same-origin CSRF checks", async ()
   for (const route of routes) {
     const normalized = route.replaceAll("\\", "/");
     if (normalized.includes("/agent/")) continue;
+    if (normalized.endsWith("/maintenance/route.ts")) continue;
     const body = await readFile(route, "utf8");
     if (/export async function (POST|PUT|PATCH|DELETE)\(/.test(body)) customerMutations.push([normalized, body]);
   }
@@ -68,6 +88,54 @@ test("authenticated browser mutations enforce same-origin CSRF checks", async ()
   for (const [route, body] of customerMutations) {
     assert.match(body, /assertSameOrigin\(request\)/, `missing same-origin guard in ${route}`);
     assert.match(body, /requireIdentity\(\)/, `missing authenticated identity in ${route}`);
+  }
+});
+
+test("machine maintenance route uses a separate constant-time bearer boundary", async () => {
+  const route = await source("app/api/internal/maintenance/route.ts");
+  const maintenance = await source("server/maintenance-service.ts");
+
+  assert.match(route, /requireMaintenanceAuthorization\(request\)/);
+  assert.match(route, /requestId/);
+  assert.doesNotMatch(route, /requireIdentity\(\)/);
+  assert.match(maintenance, /MARKETPLACE_MAINTENANCE_KEY/);
+  assert.match(maintenance, /constantTimeEqual\(expectedDigest, candidateDigest\)/);
+  assert.match(maintenance, /maintenance\.authentication/);
+  assert.match(maintenance, /cleanupExpiredArtifactData\(now\)/);
+  assert.match(maintenance, /assertRuntimeCryptographicConfiguration\(\)/);
+  assert.match(maintenance, /artifactDeletionRetentionBreaches/);
+  assert.match(maintenance, /unclaimedExpiredArtifacts/);
+  assert.match(maintenance, /unclaimedArtifactRetentionBreaches/);
+  assert.match(maintenance, /a\.content_purged_at IS NULL/);
+  assert.match(maintenance, /pendingArtifactTombstones/);
+  assert.match(maintenance, /artifactTombstoneRetentionBreaches/);
+});
+
+test("artifact retention sweeps use small resumable transitions", async () => {
+  const cleanup = await source("server/artifact-service.ts");
+  const privacy = await source("server/privacy-service.ts");
+  const storage = await source("server/artifact-storage-invariants.ts");
+  const retentionCleanup = cleanup.slice(
+    cleanup.indexOf("export async function cleanupExpiredArtifactData"),
+    cleanup.indexOf("export async function listArtifactTasks")
+  );
+
+  assert.match(storage, /ARTIFACT_PURGE_GENERATION_BATCH_SIZE = 4/);
+  assert.match(retentionCleanup, /ORDER BY a\.expires_at ASC LIMIT 1/);
+  assert.match(retentionCleanup, /LIMIT \$\{ARTIFACT_PURGE_GENERATION_BATCH_SIZE\}/);
+  assert.match(privacy, /SELECT_ARTIFACT_PURGE_GENERATIONS_SQL/);
+  assert.doesNotMatch(retentionCleanup, /LIMIT (?:10|20|50)/);
+});
+
+test("an exhausted absolute artifact deadline starts a fresh resumable attempt", async () => {
+  const trafficSweep = await source("server/artifact-service.ts");
+  const claimSweep = await source("server/artifact-worker-service.ts");
+  for (const implementation of [trafficSweep, claimSweep]) {
+    assert.match(implementation, /EXECUTION_DEADLINE_EXCEEDED/);
+    assert.match(
+      implementation,
+      /worker_id = CASE[\s\S]*?execution_deadline_at IS NULL OR execution_deadline_at <= \? THEN NULL[\s\S]*?ELSE worker_id/
+    );
   }
 });
 
@@ -101,6 +169,8 @@ test("market database does not duplicate login email or display name", async () 
 test("privacy migration upgrades legacy rows without rewriting them", async () => {
   const migration = await source("drizzle/0004_redundant_shen.sql");
   const commitmentMigration = await source("drizzle/0005_deep_blade.sql");
+  const invariantMigration = await source("drizzle/0006_silky_menace.sql");
+  const indexMigration = await source("drizzle/0007_narrow_ezekiel.sql");
 
   assert.match(migration, /CREATE TABLE `api_rate_limits`/);
   assert.match(migration, /ALTER TABLE `inference_jobs` ADD `privacy_mode` text DEFAULT 'standard' NOT NULL/);
@@ -110,6 +180,14 @@ test("privacy migration upgrades legacy rows without rewriting them", async () =
   assert.match(commitmentMigration, /ALTER TABLE `inference_jobs` ADD `digest_version` integer DEFAULT 1 NOT NULL/);
   assert.match(commitmentMigration, /ALTER TABLE `artifact_task_evidence` ADD `digest_version` integer DEFAULT 1 NOT NULL/);
   assert.doesNotMatch(commitmentMigration, /DROP TABLE|DELETE FROM/);
+  assert.match(invariantMigration, /reserved_charge_micros/);
+  assert.match(invariantMigration, /reservation_expires_at/);
+  assert.match(invariantMigration, /upload_status/);
+  assert.match(invariantMigration, /review_command_id/);
+  assert.match(invariantMigration, /schema_version/);
+  assert.doesNotMatch(invariantMigration, /DROP TABLE|DELETE FROM/);
+  assert.match(indexMigration, /idx_authorization_requests_credential_status/);
+  assert.match(indexMigration, /idx_agent_request_nonces_expires/);
 });
 
 test("runtime schema bootstrap covers every additive D1 column migration and tolerates isolate races", async () => {
@@ -125,10 +203,31 @@ test("runtime schema bootstrap covers every additive D1 column migration and tol
 
   const runtimeStatements = [...runtimeSchema.matchAll(/sql: ("(?:[^"\\]|\\.)*")/g)]
     .map((match) => normalizeSql(JSON.parse(match[1])));
-  assert.equal(migrationStatements.length, 13);
+  assert.equal(migrationStatements.length, 21);
   assert.deepEqual(new Set(runtimeStatements), new Set(migrationStatements));
   assert.match(runtimeSchema, /if \(await columnExists\(db, migration\.table, migration\.column\)\) continue/);
   assert.match(runtimeSchema, /catch \(error\)[\s\S]*?if \(!await columnExists\(db, migration\.table, migration\.column\)\) throw error/);
+});
+
+test("gateway, credential, review, upload, and cancellation boundaries fail closed", async () => {
+  const marketplace = await source("server/marketplace-service.ts");
+  const agentAuth = await source("server/agent-auth.ts");
+  const artifacts = await source("server/artifact-service.ts");
+  const worker = await source("server/artifact-worker-service.ts");
+
+  assert.match(marketplace, /fetch\(endpoint,[\s\S]*?redirect: "error"/);
+  assert.match(marketplace, /review_command_id = \?/);
+  assert.match(marketplace, /guardedReviewEventInsert/);
+  assert.match(marketplace, /schemaVersion: row\.schema_version/);
+  assert.match(agentAuth, /ar\.valid_until > \?/);
+  assert.match(agentAuth, /createCredentialLookupDigest\(gatewayToken\)/);
+  assert.match(artifacts, /upload_status = 'pending'/);
+  assert.match(artifacts, /upload_status = 'ready'/);
+  assert.match(artifacts, /part-.*crypto\.randomUUID\(\)/);
+  assert.match(artifacts, /content_purged_at IS NULL AND expires_at > \?/);
+  assert.match(artifacts, /artifact-task\.cancel-target/);
+  assert.match(worker, /cancellation_requested_at IS NULL/);
+  assert.match(worker, /ARTIFACT_TASK_CANCELLED/);
 });
 
 async function source(relativePath) {

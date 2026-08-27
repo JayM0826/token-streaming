@@ -19,6 +19,6 @@ review_required:
   - permission or approval policy changes
   - checkpoint or rollback behavior changes
   - provider routing and telemetry changes
-  - supplier gateway authentication, replay, capacity, or upstream-host policy changes
+  - supplier gateway authentication, persistent replay journal, capacity, or upstream-host policy changes
   - artifact encryption, retention, lease, checkpoint, capability heartbeat, evidence, or reservation changes
-  - privacy visibility, acknowledgement, tenant isolation, key separation, digest commitment, purge, or management-session changes
+  - privacy visibility, acknowledgement, tenant isolation, key separation, digest commitment, purge, management bootstrap/session, or local-vault changes

@@ -9,6 +9,7 @@ export interface SupplierNodeConfig {
   providerId: string;
   allowedModels: string[];
   allowedDataClasses: Array<Extract<MarketplaceDataClass, "P0" | "P1">>;
+  replayJournalPath: string;
   limits: {
     requestsPerMinute: number;
     tokensPerMinute: number;
@@ -74,6 +75,7 @@ export function loadSupplierNodeConfig(env: NodeJS.ProcessEnv = process.env): Su
     providerId,
     allowedModels,
     allowedDataClasses,
+    replayJournalPath: replayJournalPath(env.SUPPLIER_NODE_REPLAY_JOURNAL_PATH),
     limits: {
       requestsPerMinute: integer(env.SUPPLIER_NODE_REQUESTS_PER_MINUTE, 30, 1, 10_000, "SUPPLIER_NODE_REQUESTS_PER_MINUTE"),
       tokensPerMinute: integer(env.SUPPLIER_NODE_TOKENS_PER_MINUTE, 100_000, 1, 100_000_000, "SUPPLIER_NODE_TOKENS_PER_MINUTE"),
@@ -97,6 +99,14 @@ export function loadSupplierNodeConfig(env: NodeJS.ProcessEnv = process.env): Su
       )
     }
   };
+}
+
+function replayJournalPath(value: string | undefined): string {
+  const normalized = value?.trim() || ".gongsuanyun-supplier-node-replay.jsonl";
+  if (normalized.length > 4_096 || normalized.includes("\0")) {
+    throw new Error("SUPPLIER_NODE_REPLAY_JOURNAL_PATH is invalid.");
+  }
+  return normalized;
 }
 
 function requiredSecret(value: string | undefined, name: string, minimumLength: number): string {

@@ -12,6 +12,8 @@ cli_smoke:
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- --provider stub --dry-run "summarize this repo"
 supplier_agent:
   - npx pnpm@9.15.0 --filter @token-streaming/supplier-agent test
+supplier_node:
+  - npx pnpm@9.15.0 --filter @token-streaming/supplier-node test
 artifact_data_plane:
   - npx pnpm@9.15.0 --filter @token-streaming/marketplace-domain test
   - npx pnpm@9.15.0 --filter @token-streaming/supplier-node test

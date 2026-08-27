@@ -1,9 +1,19 @@
-import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
-import { SUPPLIER_AGENT_VAULT_VERSION, SupplierAgentError, type EncryptedSupplierAgentVault, type SupplierAgentSecrets } from "./types.js";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt } from "node:crypto";
+import {
+  SUPPLIER_AGENT_VAULT_VERSION,
+  SupplierAgentError,
+  type EncryptedSupplierAgentVault,
+  type SupplierAgentProfile,
+  type SupplierAgentSecrets
+} from "./types.js";
 
 const KDF_OPTIONS = { N: 32_768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 } as const;
 
-export async function encryptSupplierAgentVault(secrets: SupplierAgentSecrets, passphrase: string): Promise<EncryptedSupplierAgentVault> {
+export async function encryptSupplierAgentVault(
+  secrets: SupplierAgentSecrets,
+  passphrase: string,
+  profile: SupplierAgentProfile
+): Promise<EncryptedSupplierAgentVault> {
   validatePassphrase(passphrase);
   validateSecrets(secrets);
   const salt = randomBytes(16);
@@ -12,6 +22,7 @@ export async function encryptSupplierAgentVault(secrets: SupplierAgentSecrets, p
   const plaintext = Buffer.from(JSON.stringify(secrets), "utf8");
   try {
     const cipher = createCipheriv("aes-256-gcm", key, iv);
+    cipher.setAAD(profileAdditionalData(profile));
     const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
     return {
       vaultVersion: SUPPLIER_AGENT_VAULT_VERSION,
@@ -28,7 +39,11 @@ export async function encryptSupplierAgentVault(secrets: SupplierAgentSecrets, p
   }
 }
 
-export async function decryptSupplierAgentVault(value: unknown, passphrase: string): Promise<SupplierAgentSecrets> {
+export async function decryptSupplierAgentVault(
+  value: unknown,
+  passphrase: string,
+  profile: SupplierAgentProfile
+): Promise<SupplierAgentSecrets> {
   validatePassphrase(passphrase);
   const vault = validateVault(value);
   const salt = decode(vault.salt, 16, "salt");
@@ -39,6 +54,7 @@ export async function decryptSupplierAgentVault(value: unknown, passphrase: stri
   let plaintext: Buffer | undefined;
   try {
     const decipher = createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAAD(profileAdditionalData(profile));
     decipher.setAuthTag(authTag);
     plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     const parsed = JSON.parse(plaintext.toString("utf8")) as unknown;
@@ -84,6 +100,21 @@ function validateSecrets(value: unknown): SupplierAgentSecrets {
     throw new SupplierAgentError("INVALID_INPUT", "Provider API Key 长度无效。");
   }
   return { gatewayToken: value.gatewayToken, upstreamApiKey: value.upstreamApiKey };
+}
+
+function profileAdditionalData(profile: SupplierAgentProfile): Buffer {
+  const canonicalProfile = canonicalJson(profile);
+  return createHash("sha256")
+    .update("gongsuanyun:supplier-agent:vault-profile:v2\0", "utf8")
+    .update(canonicalProfile, "utf8")
+    .digest();
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
 async function deriveKey(passphrase: string, salt: Buffer): Promise<Buffer> {

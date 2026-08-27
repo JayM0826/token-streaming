@@ -105,6 +105,12 @@ export async function sha256Bytes(value: ArrayBuffer | ArrayBufferView): Promise
   return bytesToHex(new Uint8Array(digest));
 }
 
+export async function createCredentialLookupDigest(token: string): Promise<{ digest: string; version: 2 }> {
+  const payload = new TextEncoder().encode(`gongsuanyun.credential-lookup.v2\n${token}`);
+  const signature = await crypto.subtle.sign("HMAC", await commitmentKey(), payload);
+  return { digest: bytesToHex(new Uint8Array(signature)), version: 2 };
+}
+
 export async function createDigestCommitment(
   sha256Digest: string,
   context: DigestCommitmentContext
@@ -121,6 +127,40 @@ export async function createDigestCommitment(
   ].join("\n"));
   const signature = await crypto.subtle.sign("HMAC", await commitmentKey(), payload);
   return { digest: bytesToHex(new Uint8Array(signature)), version: 2 };
+}
+
+/**
+ * Validates the production key set without exporting key material. This is
+ * intentionally part of maintenance so deployment health proves that all
+ * encryption domains have independent 256-bit keys before retention mutates
+ * customer data.
+ */
+export async function assertRuntimeCryptographicConfiguration(): Promise<void> {
+  const runtime = getRuntimeEnv();
+  const configured = [
+    runtime.MARKETPLACE_CREDENTIAL_KEY,
+    runtime.MARKETPLACE_CONTENT_KEY,
+    runtime.MARKETPLACE_ARTIFACT_KEY,
+    runtime.MARKETPLACE_COMMITMENT_KEY
+  ];
+  if (process.env.NODE_ENV === "development" && configured.every((value) => !value)) {
+    await Promise.all([credentialKey(), contentKey(), artifactKey(), commitmentKey()]);
+    return;
+  }
+  if (configured.some((value) => !value)) invalidRuntimeKeyConfiguration();
+  let fingerprints: string[];
+  try {
+    fingerprints = configured.map((value) => {
+      const bytes = base64ToBytes(value!);
+      if (bytes.byteLength !== 32) invalidRuntimeKeyConfiguration();
+      return bytesToHex(bytes);
+    });
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    invalidRuntimeKeyConfiguration();
+  }
+  if (new Set(fingerprints).size !== fingerprints.length) invalidRuntimeKeyConfiguration();
+  await Promise.all([credentialKey(), contentKey(), artifactKey(), commitmentKey()]);
 }
 
 export async function encryptArtifactChunk(
@@ -324,6 +364,10 @@ function contentAdditionalData(context: ContentEncryptionContext): ArrayBuffer {
 
 function invalidKeyVersion(): never {
   throw new ApiError("INTERNAL_ERROR", "加密密钥版本不受支持。", 500);
+}
+
+function invalidRuntimeKeyConfiguration(): never {
+  throw new ApiError("INTERNAL_ERROR", "生产加密密钥配置无效或未相互隔离。", 503);
 }
 
 function artifactAdditionalData(input: {

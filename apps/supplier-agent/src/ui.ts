@@ -10,6 +10,7 @@ export function renderSupplierAgentUi(nonce: string): string {
 <section class="panel hidden" id="connectionPanel"><span class="kicker">MARKETPLACE CONNECTION</span><h2>平台接入资料</h2><p>网关令牌属于高敏感凭据。每次查看都必须重新验证本地加密口令；Provider API Key 永远不会显示或提交给平台。</p><form id="connectionUnlockForm"><label>重新输入本地加密口令<input name="passphrase" type="password" autocomplete="current-password" minlength="12" required></label><div class="actions"><button type="button" class="secondary" id="cancelConnection">取消</button><button class="primary">验证并查看</button></div></form><div class="hidden" id="connectionDetails"><dl class="details"><div><dt>Provider</dt><dd id="connectProvider">—</dd></div><div><dt>模型范围</dt><dd id="connectModels">—</dd></div><div><dt>网关地址</dt><dd id="connectEndpoint">—</dd></div><div><dt>任务平台</dt><dd id="connectControlPlane">—</dd></div><div><dt>数据范围</dt><dd id="connectData">—</dd></div></dl><div class="secret" id="connectToken">—</div><div class="actions"><button class="secondary" id="copyButton">复制接入资料</button><button class="primary" id="closeConnection">完成</button></div></div></section></main></div><div class="toast hidden" id="toast"></div>
 <script nonce="${nonce}">
 (()=>{
+  let launchBootstrap=new URLSearchParams(location.hash.slice(1)).get('bootstrap');
   history.replaceState(null,'',location.pathname);
   const $=id=>document.getElementById(id);
   const panels=['setupPanel','unlockPanel','dashboardPanel'];
@@ -33,7 +34,8 @@ export function renderSupplierAgentUi(nonce: string): string {
   $('cancelConnection').addEventListener('click',closeConnection);
   $('closeConnection').addEventListener('click',closeConnection);
   $('copyButton').addEventListener('click',async()=>{if(!latestConnection)return;const text=['Provider: '+latestConnection.providerId,'Models: '+latestConnection.exactModels.join(','),'Gateway: '+latestConnection.gatewayEndpoint,'Control plane: '+latestConnection.controlPlaneBaseUrl,'Gateway token: '+latestConnection.gatewayBearerToken].join('\n');await navigator.clipboard.writeText(text);toast('接入资料已复制，请仅粘贴到共算云授权页')});
-  refresh();
+  const initialize=async()=>{try{if(launchBootstrap){const bootstrapToken=launchBootstrap;launchBootstrap=null;await api('/api/bootstrap',{method:'POST',body:JSON.stringify({bootstrapToken})})}await refresh()}catch(error){launchBootstrap=null;toast(error.message,true)}};
+  initialize();
   setInterval(()=>{if(latestStatus?.unlocked)refresh()},3000);
 })();
 </script></body></html>`;

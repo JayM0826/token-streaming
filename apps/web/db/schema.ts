@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
@@ -53,17 +54,25 @@ export const authorizationRequests = sqliteTable(
     encryptedGatewayToken: text("encrypted_gateway_token").notNull(),
     gatewayTokenIv: text("gateway_token_iv").notNull(),
     gatewayTokenDigest: text("gateway_token_digest"),
+    gatewayTokenDigestVersion: integer("gateway_token_digest_version").notNull().default(1),
     encryptionKeyVersion: integer("encryption_key_version").notNull().default(1),
     status: text("status").notNull(),
     reviewNote: text("review_note"),
     reviewedBy: text("reviewed_by"),
+    reviewCommandId: text("review_command_id"),
     reviewedAt: text("reviewed_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull()
   },
   (table) => [
     index("idx_authorization_requests_tenant_status").on(table.tenantId, table.status),
-    index("idx_authorization_requests_status_created").on(table.status, table.createdAt)
+    index("idx_authorization_requests_status_created").on(table.status, table.createdAt),
+    index("idx_authorization_requests_credential_status").on(
+      table.gatewayTokenDigestVersion,
+      table.gatewayTokenDigest,
+      table.status,
+      table.validUntil
+    )
   ]
 );
 
@@ -109,6 +118,7 @@ export const marketplaceEvents = sqliteTable(
     aggregateId: text("aggregate_id").notNull(),
     aggregateVersion: integer("aggregate_version").notNull(),
     eventType: text("event_type").notNull(),
+    schemaVersion: integer("schema_version").notNull().default(1),
     payloadJson: text("payload_json").notNull(),
     occurredAt: text("occurred_at").notNull()
   },
@@ -138,6 +148,8 @@ export const inferenceJobs = sqliteTable(
     promptDigest: text("prompt_digest").notNull(),
     digestVersion: integer("digest_version").notNull().default(1),
     maxOutputTokens: integer("max_output_tokens").notNull(),
+    reservedChargeMicros: text("reserved_charge_micros").notNull().default("0"),
+    reservationExpiresAt: text("reservation_expires_at"),
     status: text("status").notNull(),
     providerRequestId: text("provider_request_id"),
     inputTokens: integer("input_tokens"),
@@ -229,7 +241,10 @@ export const ledgerEntries = sqliteTable(
   },
   (table) => [
     index("idx_ledger_entries_tenant_created").on(table.tenantId, table.createdAt),
-    index("idx_ledger_entries_job_id").on(table.jobId)
+    index("idx_ledger_entries_job_id").on(table.jobId),
+    uniqueIndex("idx_ledger_entries_job_effect")
+      .on(table.jobId, table.entryType)
+      .where(sql`${table.jobId} IS NOT NULL AND ${table.entryType} IN ('inference-debit', 'supplier-credit', 'platform-fee')`)
   ]
 );
 
@@ -313,11 +328,30 @@ export const artifactChunks = sqliteTable(
     ciphertextSha256: text("ciphertext_sha256").notNull(),
     storageKey: text("storage_key").notNull(),
     iv: text("iv").notNull(),
+    uploadStatus: text("upload_status").notNull().default("ready"),
     uploadedAt: text("uploaded_at").notNull()
   },
   (table) => [
     uniqueIndex("idx_artifact_chunks_part").on(table.artifactId, table.partNumber),
     index("idx_artifact_chunks_tenant_artifact").on(table.tenantId, table.artifactId)
+  ]
+);
+
+export const artifactObjectDeletions = sqliteTable(
+  "artifact_object_deletions",
+  {
+    storageKey: text("storage_key").primaryKey(),
+    artifactId: text("artifact_id").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    nextAttemptAt: text("next_attempt_at").notNull(),
+    retainUntil: text("retain_until").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => [
+    index("idx_artifact_object_deletions_due").on(table.nextAttemptAt, table.retainUntil),
+    index("idx_artifact_object_deletions_artifact").on(table.tenantId, table.artifactId)
   ]
 );
 
@@ -369,6 +403,7 @@ export const artifactTasks = sqliteTable(
     workerId: text("worker_id"),
     leaseDigest: text("lease_digest"),
     leaseExpiresAt: text("lease_expires_at"),
+    executionDeadlineAt: text("execution_deadline_at"),
     inputTokens: integer("input_tokens"),
     outputTokens: integer("output_tokens"),
     totalTokens: integer("total_tokens"),
@@ -377,6 +412,7 @@ export const artifactTasks = sqliteTable(
     outputIv: text("output_iv"),
     outputExpiresAt: text("output_expires_at"),
     contentPurgedAt: text("content_purged_at"),
+    cancellationRequestedAt: text("cancellation_requested_at"),
     errorCode: text("error_code"),
     createdAt: text("created_at").notNull(),
     startedAt: text("started_at"),
@@ -446,5 +482,8 @@ export const agentRequestNonces = sqliteTable(
     nonce: text("nonce").notNull(),
     expiresAt: text("expires_at").notNull()
   },
-  (table) => [uniqueIndex("idx_agent_request_nonces_unique").on(table.credentialDigest, table.nonce)]
+  (table) => [
+    uniqueIndex("idx_agent_request_nonces_unique").on(table.credentialDigest, table.nonce),
+    index("idx_agent_request_nonces_expires").on(table.expiresAt)
+  ]
 );

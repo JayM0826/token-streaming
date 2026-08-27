@@ -10,9 +10,9 @@ The node never starts local Codex, executes tools or shell commands, follows buy
 - Exact model and P0/P1 data-class allowlists; P2/P3 fail closed.
 - Fixed public HTTPS upstream base URL, explicit hostname allowlist, and redirects disabled.
 - Bounded body/response sizes, RPM/TPM/concurrency/output limits, 60-second default upstream timeout, and graceful draining.
-- Fifteen-minute in-memory idempotent replay with request-body conflict detection; no prompt or output persistence on disk.
+- Fifteen-minute in-process idempotent result replay plus a crash-safe replay journal v2 for nonce and request claims. It stores SHA-256 identifier digests, expiries, and a gateway-token-keyed, domain-separated HMAC-SHA256 commitment to the request-body digest; neither the body nor its raw SHA-256 digest is persisted. A claim is fully appended and fsynced before an upstream call can start, so captured or re-signed requests remain blocked after a process or container restart without persisting prompts or outputs. `SupplierNodeConfig.replayJournalPath` must resolve to a non-empty durable path; the runtime refuses startup rather than silently using memory-only replay protection.
 - Loopback binding by default. The included container composition exposes only Caddy, which obtains and renews public TLS certificates.
-- Read-only, non-root supplier container with all Linux capabilities dropped and a small non-executable temporary filesystem.
+- Non-root supplier container with an immutable root filesystem, all Linux capabilities dropped, a small non-executable temporary filesystem, and one named writable volume used only for the replay journal.
 - Exact comparison between the requested model and the upstream response `model`; successful responses include a signed execution-evidence record binding Provider, model, request ID, input/output digests, usage, and completion time.
 - Headless artifact executor for bounded UTF-8 files: verifies the ordered chunk manifest and every SHA-256 digest, uses deterministic segments and hierarchical reduction, isolates file text as untrusted data, enforces a full-task token budget, and signs aggregate evidence.
 - Resumable segment checkpoints contain only summaries, aggregate usage, and opaque Provider request IDs. The executor never writes the original file, executes content, follows embedded URLs, or invokes tools.
@@ -33,6 +33,14 @@ Prerequisites: a Linux server with Docker Compose, ports 80/443 open, and a DNS 
 5. Run `docker compose up -d --build`, then check `https://<your-host>/healthz`.
 6. Submit `https://<your-host>/v3/inference` as the marketplace gateway endpoint. Platform approval still requires that hostname in the production gateway allowlist.
 
+The Compose deployment mounts `supplier_node_state` at `/var/lib/gongsuanyun` and writes the replay journal there. Preserve this named volume across upgrades and ordinary restarts; `docker compose down -v` deletes it and therefore discards the still-live replay window. The standard configuration loader resolves `.gongsuanyun-supplier-node-replay.jsonl` in the working directory unless `SUPPLIER_NODE_REPLAY_JOURNAL_PATH` is set to a stable private path. Programmatic embedders that construct `SupplierNodeConfig` directly must provide a non-empty `replayJournalPath`; the runtime has no in-memory fallback.
+
+The current journal is a single-writer store: run at most one active supplier-node process for a given gateway token. Sharing the journal file or Docker volume between active processes does not provide atomic cross-process replay claims. Active-active HA for one token requires a shared atomic nonce/request-claim store and an explicit HA design before multiple writers can be enabled.
+
+At startup, live journal-v1 request records are converted from their legacy raw body digest to the keyed v2 commitment and the active set is rewritten before readiness is exposed; expired records are dropped. Corrupt, duplicate, or oversized input fails startup. Runtime compaction runs every five minutes and is also triggered after 1,000 appends or when the file reaches 8 MiB. An append that would cross the hard 16 MiB limit first attempts compaction and then fails closed if the active set still cannot fit. Compaction writes a mode-`0600` temporary file, fsyncs it, atomically replaces the canonical journal, and syncs the parent directory where the platform supports it.
+
+Any append or compaction failure permanently marks replay protection unhealthy for that process. `/healthz` then reports `draining` with HTTP 503, and new nonce or request claims return a retryable 503 before Provider execution (already-seen replays can still be rejected earlier as replays). Operators must correct the persistent-volume problem and restart the node; the runtime does not silently fall back to memory-only protection.
+
 `GET /healthz` exposes only readiness and protocol version. During approval, the marketplace derives `POST /v3/attestation` from the same origin, sends a signed one-time challenge, and verifies the returned Provider identity, exact model inventory, P0/P1 scope, and capacity before activation. The full node inventory is therefore not public.
 
 Run `node dist/index.js doctor` before startup to validate configuration without making a provider request. It reports only the provider identifier, upstream hostname, model/data allowlists, and limits; secret values are never returned.
@@ -51,3 +59,5 @@ The artifact executor uses the same adapters and exact-model check. Adapter call
 ```bash
 corepack pnpm@9.15.0 --filter @token-streaming/supplier-node test
 ```
+
+The runtime suite covers restart rejection, v1-to-v2 startup migration, removal of raw body digests, periodic expiry compaction, corrupt startup, and terminal fail-closed behavior after background compaction failure.

@@ -1,11 +1,28 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { once } from "node:events";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { createExecutionEvidenceSignature, createGatewaySignature, sha256Hex } from "../dist/signature.js";
 import { SupplierNodeRuntime } from "../dist/runtime.js";
 import { createSupplierNodeServer } from "../dist/server.js";
 
 const token = "gateway-token-abcdefghijklmnopqrstuvwxyz-123456";
+const replayTestRoot = path.join(tmpdir(), `gongsuanyun-runtime-test-${process.pid}-${randomUUID()}`);
+test.after(() => rm(replayTestRoot, { recursive: true, force: true }));
+
+test("runtime refuses to start without durable replay protection", () => {
+  assert.throws(
+    () => new SupplierNodeRuntime(
+      config({ replayJournalPath: undefined }),
+      { providerId: "provider-test", invoke: async () => providerResult() },
+      () => undefined
+    ),
+    /replay journal path is required/
+  );
+});
 
 test("runtime enforces signed idempotency and never logs prompt or credentials", async () => {
   const logs = [];
@@ -64,6 +81,44 @@ test("runtime fails closed for unapproved models, substitutions, and provider ov
   assert.equal(substitutionRejected.status, 502);
   assert.equal(substitutionRejected.body.error.code, "UPSTREAM_MODEL_MISMATCH");
   assert.equal(calls, 1);
+});
+
+test("persistent replay journal rejects captured and re-signed requests after restart", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "gongsuanyun-replay-"));
+  const replayJournalPath = path.join(root, "replay.jsonl");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let firstCalls = 0;
+  const firstRuntime = new SupplierNodeRuntime(
+    config({ replayJournalPath }),
+    { providerId: "provider-test", invoke: async () => { firstCalls += 1; return providerResult(); } },
+    () => undefined
+  );
+  const captured = signedCall(requestBody(), "nonce-before-restart-1234");
+  assert.equal((await firstRuntime.handleInference(captured)).status, 200);
+  assert.equal(firstCalls, 1);
+  firstRuntime.setDraining();
+  const journal = await readFile(replayJournalPath, "utf8");
+  assert.match(journal, /"version":2/);
+  assert.match(journal, /"bodyCommitment":"[a-f0-9]{64}"/);
+  assert.doesNotMatch(journal, /bodySha256|private prompt/);
+  assert.equal(journal.includes(sha256Hex(captured.rawBody)), false);
+
+  let restartedCalls = 0;
+  const restarted = new SupplierNodeRuntime(
+    config({ replayJournalPath }),
+    { providerId: "provider-test", invoke: async () => { restartedCalls += 1; return providerResult(); } },
+    () => undefined
+  );
+  const capturedReplay = await restarted.handleInference(captured);
+  const reSignedReplay = await restarted.handleInference(
+    signedCall(requestBody(), "nonce-after-restart-12345")
+  );
+  assert.equal(capturedReplay.status, 409);
+  assert.equal(capturedReplay.body.error.code, "REPLAY_DETECTED");
+  assert.equal(reSignedReplay.status, 409);
+  assert.equal(reSignedReplay.body.error.code, "REPLAY_DETECTED");
+  assert.equal(restartedCalls, 0);
+  restarted.setDraining();
 });
 
 test("HTTP server exposes health and the signed v3 inference route", async (t) => {
@@ -143,7 +198,7 @@ test("HTTP server exposes health and the signed v3 inference route", async (t) =
   );
 });
 
-function config() {
+function config(overrides = {}) {
   return {
     bindHost: "127.0.0.1",
     port: 8789,
@@ -151,6 +206,7 @@ function config() {
     providerId: "provider-test",
     allowedModels: ["model-a"],
     allowedDataClasses: ["P0"],
+    replayJournalPath: path.join(replayTestRoot, `${randomUUID()}.jsonl`),
     limits: {
       requestsPerMinute: 30,
       tokensPerMinute: 100_000,
@@ -164,7 +220,8 @@ function config() {
       apiKey: "upstream-secret-value",
       timeoutMs: 10_000,
       maximumResponseBytes: 10_000
-    }
+    },
+    ...overrides
   };
 }
 

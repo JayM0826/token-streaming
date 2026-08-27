@@ -18,13 +18,13 @@ pnpm acceptance:check -- --json
 - 明确非目标仍保持未实现：Desktop App、多套生产策略、分布式 Agent、向量数据库、企业权限后台、插件市场、云同步。
 - 最新本地质量证据：197/197 tests、lint、7 个包发布检查、7 个包加 CLI/headless core 隔离安装均通过。
 
-## 算力市场扩展审计（2026-08-26）
+## 算力市场扩展审计（2026-08-28）
 
-继承运行时之外的“共算云”扩展已经通过当前仓库门禁：292/292 tests、Web typecheck/lint/production build、10 个包发布检查、10 个包及 CLI/supplier-node/supplier-agent/headless core/marketplace-domain 隔离安装均通过，生产依赖审计为 0 个已知漏洞。数据库 0000–0005 迁移由自动化测试在真实临时 D1 中顺序执行：测试会先写入旧版推理、文件和文件任务，再验证 19 张业务表、旧行保留、`gateway_token_digest`、隐私模式、内容密钥版本、摘要版本和持久化限流索引；运行时增量引导与全部 13 条历史列迁移保持一致，并在 Worker isolate 竞争后重新读取 schema。
+继承运行时之外的“共算云”扩展已经通过当前仓库门禁：341/341 tests、Web typecheck/lint/production build、10 个包发布检查、10 个包及 CLI/supplier-node/supplier-agent/headless core/marketplace-domain 隔离安装均通过，生产依赖高危审计为 0 个已知漏洞。数据库 0000–0010 迁移由自动化测试在真实临时 D1 中顺序执行：测试会先写入旧版推理、文件和文件任务，再验证 20 张业务表、旧行保留、双命名空间 nonce、凭据 HMAC 迁移、独立对象删除墓碑、财务效果唯一索引、绝对执行期限和运行时 schema 竞争恢复。
 
-本轮新增的大文件数据面实现了：256 MiB 上限、4 MiB SHA-256 分块、浏览器刷新后断点续传、R2 AES-256-GCM 加密、租户/AAD/明密文摘要校验、独立 artifact 密钥、供应 Agent 出站能力心跳、精确授权/Provider/模型/媒体/大小匹配、五分钟租约、加密本地检查点、最多三次执行、30 分钟队列超时、UTF-8 非执行处理、分段 map/reduce、全任务 token 预算、聚合签名执行证据、最高费用预留、受条件保护的原子结算和过期密文清理。详细信任边界见 ADR 0005。
+本轮新增的大文件数据面实现了：256 MiB 上限、4 MiB SHA-256 分块、浏览器刷新后断点续传、R2 AES-256-GCM 加密、租户/AAD/明密文摘要校验、独立 artifact 密钥、不可变对象 generation、`pending → ready → deleting` 状态、非滑动 24 小时持久删除墓碑、按一个 artifact/四个 generation/四个队列 key 控制的 D1 有界清除、64-generation 文件最多 16 次可重试调用、generation metadata 清零后才标记 `deleted`、task 输出到期标记与完整内容清除证明分离、24 小时输出到期后仍保留 48 小时输入主动清除入口、最终状态后的显式重试幂等补写 artifact/task 完成审计、供应 Agent 出站能力心跳、精确授权/Provider/模型/媒体/大小匹配、五分钟租约、每次 attempt 六小时绝对期限、正数恢复段缺失精确认证 checkpoint 时以 `ARTIFACT_CHECKPOINT_REQUIRED` 在 Provider 调用前失败、所有非重试终态的 checkpoint 删除失败闭锁、最多三次执行、30 分钟队列超时、UTF-8 非执行处理、分段 map/reduce、全任务 token 预算、聚合签名执行证据、跨工作负载最高费用原子预留、单效果结算和两阶段取消。完整 maintenance 含 schema bootstrap，Workers Paid 的每 invocation 1,000 query 配额是上线硬前置；小批次清除不构成更低 D1 上限兼容声明。详细信任边界见 ADR 0005、0007。
 
-隐私安全增量实现了：严格模式默认与明文处理确认、购买方专属内容视图和主动清除、登录资料不复制、四类密钥分域、记录绑定 AES-GCM AAD、租户/资源绑定 HMAC 内容承诺、持久化限流与配额、全客户写接口同源校验、安全响应头，以及 Supplier Agent v0.3 的 HttpOnly 回环会话、令牌重认证/自动隐藏和口令失败节流。普通共享节点及其上游仍会在执行时取得明文，不宣传为端到端加密；详细决策见 ADR 0006。
+隐私安全增量实现了：严格模式默认与明文处理确认、购买方专属内容视图和主动清除、登录资料不复制、四类独立 256-bit 密钥的上线校验、记录绑定 AES-GCM AAD、租户/资源绑定 HMAC 内容承诺、持久化限流与配额、全客户写接口同源校验、安全响应头、`.env`/`.dev.vars`/`.wrangler` 本地秘密与状态忽略，以及 Supplier Agent v0.3 的 HttpOnly 回环会话、完整 profile 绑定 vault v2、令牌重认证/自动隐藏、口令失败节流、固定六小时 checkpoint 和删除失败闭锁。维护审计新增未取得清除所有权的过期 artifact、尚未完成 generation tombstone 的 artifact 及各自 24 小时 breach 指标。Supplier Node 的 replay journal v2 在上游执行前 fsync，使用 gateway-token HMAC body commitment，拒绝无持久路径启动，并在损坏或压缩失败后停止接单。普通共享节点及其上游仍会在执行时取得明文，不宣传为端到端加密；详细决策见 ADR 0001、0006、0007。
 
 当前明确格式边界为纯文本、Markdown、CSV/TSV、JSON/NDJSON 与 XML。PDF、Office、图片、音视频、压缩包和代码沙箱未伪装为已支持能力，提交时 fail closed；公开商业发布仍依赖持牌支付、真实 KYC/KYB/税务/出款、Provider 转售许可和独立上游回执等级。
 
@@ -33,6 +33,12 @@ pnpm acceptance:check -- --json
 - `pnpm launch:check` 已通过：292/292 tests、固定 pnpm 版本的 workspace lint、10 个包发布检查、10 个包与 CLI/supplier-node/supplier-agent/headless core/marketplace-domain 隔离安装、Web production build，以及生产依赖高危审计。
 - Sites 公开版本已升级到包含 0000–0005 迁移、持久化限流、主动内容清除和四类分域密钥的版本；线上 D1 已核验为 19 张业务表，部署后 Worker 错误日志为空。
 - 该发布是使用赠送测试余额、P0/P1 和失败关闭策略的公开技术 Beta，不代表支付、KYC/KYB、税务、出款、Provider 商业授权或地区合规已经完成。未进入生产白名单的供应节点仍不能被批准。
+
+## 2026-08-28 加固版本发布前证据
+
+- `corepack pnpm@9.15.0 launch:check` 已通过：341/341 tests、全 workspace lint、10 个包发布检查、10 个包与 CLI/supplier-node/supplier-agent/headless core/marketplace-domain 隔离安装、Web production build，以及生产依赖高危审计。
+- 新构建中的 SQL 文件与 source 完全一致，均为 `0000`–`0010` 共 11 条；`dist/server/index.js`、`.openai/hosting.json` 和完整 Drizzle journal 均已核验存在。
+- 该证据只证明发布候选代码与归档。生产 D1 升级、同 commit SHA 远端 CI、维护任务、公开身份头剥离和匿名生产模式仍必须在部署流程中现场验证，不能由本地门禁代替。
 
 ## 22 项范围审计
 

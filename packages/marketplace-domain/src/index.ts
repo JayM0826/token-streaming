@@ -5,4 +5,5 @@ export * from "./settlement.js";
 export * from "./gateway-attestation.js";
 export * from "./execution-evidence.js";
 export * from "./artifact-evidence.js";
+export * from "./artifact-cancellation.js";
 export * from "./privacy.js";

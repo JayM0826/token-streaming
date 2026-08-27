@@ -21,7 +21,13 @@ rules:
   - Keep upstream authentication and native request, response, usage, and error fields inside provider adapters.
   - Reject arbitrary URLs, redirects, tools, shell execution, file access, and unconfigured provider hosts.
   - Bind to loopback by default and place public deployments behind a terminating HTTPS reverse proxy.
-  - Keep request replay state and idempotent response replay bounded and in memory.
+  - Persist replay journal v2 with hashed identifiers, expiries, and a gateway-token-keyed domain-separated HMAC commitment to each request-body digest; never persist raw body digests, prompts, outputs, credentials, signatures, or authorization headers.
+  - Require SupplierNodeConfig.replayJournalPath to resolve to a non-empty durable path and refuse startup rather than degrading to memory-only replay protection.
+  - Fully append and fsync nonce and request claims before upstream execution; migrate live v1 records to keyed v2 at startup while preserving their replay semantics.
+  - Compact atomically through an fsynced private temporary file and rename every five minutes, after 1,000 appends, at 8 MiB, or before crossing the hard 16 MiB limit.
+  - Preserve the journal across process and container restarts; fail startup on corruption, duplicates, or unsafe size, and make readiness plus all later claims fail closed after any append or compaction failure.
+  - Mount the container journal on its dedicated named state volume while keeping the root filesystem read-only.
+  - Permit only one active journal writer per gateway token; active-active HA requires a shared atomic replay-claim store, and a shared volume alone is insufficient.
   - Require the upstream response model to match the requested exact model and sign canonical per-job execution evidence before returning a billable response.
   - Treat artifact bytes as untrusted, non-executable data; verify ordered chunk and whole-content digests before signing aggregate evidence.
   - Enforce monotonic resumable checkpoints and a caller-approved full-task token ceiling across map and reduce calls.

@@ -8,6 +8,7 @@ test("supplier node configuration is explicit and keeps secrets out of diagnosti
   assert.equal(config.upstream.baseUrl.hostname, "api.provider.example");
   assert.deepEqual(config.allowedModels, ["model-a", "model-b"]);
   assert.deepEqual(config.allowedDataClasses, ["P0", "P1"]);
+  assert.equal(config.replayJournalPath, ".gongsuanyun-supplier-node-replay.jsonl");
 });
 
 test("supplier node rejects private upstreams, missing host authorization, and short gateway tokens", () => {

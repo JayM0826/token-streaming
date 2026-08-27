@@ -22,6 +22,7 @@ import type { AgentAuthorizationIdentity } from "./agent-auth";
 import { cleanupExpiredArtifactData, type ArtifactTaskRow } from "./artifact-service";
 import { ApiError } from "./http";
 import { getMarketplaceRuntimePolicy } from "./runtime-policy";
+import { COMPLETE_ARTIFACT_TASK_SQL } from "./financial-invariants";
 import {
   decryptArtifactChunk,
   decryptContent,
@@ -93,20 +94,43 @@ export async function claimArtifactTask(
     JSON.stringify([...supportedMediaTypes].sort()),
     maxArtifactBytes, now, heartbeatExpiresAt
   ).run();
-  const maximumAttempts = getMarketplaceRuntimePolicy().artifactMaximumAttempts;
+  const policy = getMarketplaceRuntimePolicy();
+  const maximumAttempts = policy.artifactMaximumAttempts;
   await db.batch([
     db.prepare(
+      `UPDATE artifact_tasks SET status = 'cancelled', lease_digest = NULL, lease_expires_at = NULL,
+       execution_deadline_at = NULL,
+       instruction_ciphertext = '', instruction_iv = '',
+       error_code = 'USER_CANCELLED', completed_at = ?, updated_at = ?
+       WHERE supplier_tenant_id = ? AND cancellation_requested_at IS NOT NULL
+         AND status IN ('claimed', 'running')
+         AND (lease_expires_at < ? OR execution_deadline_at IS NULL OR execution_deadline_at <= ?)`
+    ).bind(now, now, identity.supplierTenantId, now, now),
+    db.prepare(
       `UPDATE artifact_tasks SET status = 'queued', lease_digest = NULL, lease_expires_at = NULL,
-       error_code = 'LEASE_EXPIRED', updated_at = ?
+       worker_id = CASE
+         WHEN execution_deadline_at IS NULL OR execution_deadline_at <= ? THEN NULL
+         ELSE worker_id
+       END,
+       execution_deadline_at = NULL,
+       error_code = CASE
+         WHEN execution_deadline_at IS NULL OR execution_deadline_at <= ?
+           THEN 'EXECUTION_DEADLINE_EXCEEDED'
+         ELSE 'LEASE_EXPIRED'
+       END, updated_at = ?
        WHERE supplier_tenant_id = ? AND status IN ('claimed', 'running')
-         AND lease_expires_at < ? AND attempt < ?`
-    ).bind(now, identity.supplierTenantId, now, maximumAttempts),
+         AND cancellation_requested_at IS NULL
+         AND (lease_expires_at < ? OR execution_deadline_at IS NULL OR execution_deadline_at <= ?) AND attempt < ?`
+    ).bind(now, now, now, identity.supplierTenantId, now, now, maximumAttempts),
     db.prepare(
       `UPDATE artifact_tasks SET status = 'failed', lease_digest = NULL, lease_expires_at = NULL,
+       execution_deadline_at = NULL,
+       instruction_ciphertext = '', instruction_iv = '',
        error_code = 'LEASE_EXPIRED', completed_at = ?, updated_at = ?
        WHERE supplier_tenant_id = ? AND status IN ('claimed', 'running')
-         AND lease_expires_at < ? AND attempt >= ?`
-    ).bind(now, now, identity.supplierTenantId, now, maximumAttempts)
+         AND cancellation_requested_at IS NULL
+         AND (lease_expires_at < ? OR execution_deadline_at IS NULL OR execution_deadline_at <= ?) AND attempt >= ?`
+    ).bind(now, now, identity.supplierTenantId, now, now, maximumAttempts)
   ]);
   const candidates = await db.prepare(
       `SELECT t.*, a.file_name AS artifact_file_name, a.media_type AS artifact_media_type,
@@ -136,22 +160,43 @@ export async function claimArtifactTask(
   const resumeFromSegment = candidate.worker_id === workerId ? candidate.completed_segments : 0;
   const leaseToken = randomToken();
   const leaseDigest = await sha256Hex(leaseToken);
-  const leaseExpiresAt = new Date(
-    Date.now() + getMarketplaceRuntimePolicy().artifactLeaseMinutes * 60_000
+  const executionDeadlineAt = new Date(
+    Date.now() + policy.artifactMaximumExecutionMinutes * 60_000
   ).toISOString();
+  const leaseExpiresAt = new Date(Math.min(
+    Date.now() + policy.artifactLeaseMinutes * 60_000,
+    Date.parse(executionDeadlineAt)
+  )).toISOString();
   const claimed = await db.prepare(
     `UPDATE artifact_tasks SET status = 'claimed', worker_id = ?, lease_digest = ?, lease_expires_at = ?,
+      execution_deadline_at = ?,
       attempt = attempt + 1, completed_segments = ?, total_segments = CASE WHEN ? = 0 THEN NULL ELSE total_segments END,
       processed_bytes = CASE WHEN ? = 0 THEN 0 ELSE processed_bytes END,
       input_tokens = CASE WHEN ? = 0 THEN NULL ELSE input_tokens END,
       output_tokens = CASE WHEN ? = 0 THEN NULL ELSE output_tokens END,
       total_tokens = CASE WHEN ? = 0 THEN NULL ELSE total_tokens END,
       started_at = COALESCE(started_at, ?), updated_at = ?, error_code = NULL
-     WHERE task_id = ? AND supplier_tenant_id = ? AND status = 'queued'`
+     WHERE task_id = ? AND supplier_tenant_id = ? AND status = 'queued'
+       AND cancellation_requested_at IS NULL
+       AND EXISTS (
+         SELECT 1 FROM capacity_offers o
+         JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
+         JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id
+         WHERE o.offer_id = artifact_tasks.offer_id AND o.status = 'active'
+           AND o.valid_from <= ? AND o.valid_until > ? AND ar.status = 'approved'
+           AND ar.valid_until > ? AND s.status = 'active' AND s.supply_enabled = 1
+           AND (
+             (SELECT COUNT(*) FROM inference_jobs
+               WHERE offer_id = artifact_tasks.offer_id AND status IN ('reserved', 'running'))
+             + (SELECT COUNT(*) FROM artifact_tasks active_tasks
+               WHERE active_tasks.offer_id = artifact_tasks.offer_id
+                 AND active_tasks.status IN ('claimed', 'running'))
+           ) < o.concurrency
+       )`
   ).bind(
-    workerId, leaseDigest, leaseExpiresAt, resumeFromSegment,
+    workerId, leaseDigest, leaseExpiresAt, executionDeadlineAt, resumeFromSegment,
     resumeFromSegment, resumeFromSegment, resumeFromSegment, resumeFromSegment, resumeFromSegment,
-    now, now, candidate.task_id, identity.supplierTenantId
+    now, now, candidate.task_id, identity.supplierTenantId, now, now, now
   ).run();
   if ((claimed.meta.changes ?? 0) !== 1) {
     return {
@@ -162,7 +207,8 @@ export async function claimArtifactTask(
     };
   }
   const chunks = await db.prepare(
-    `SELECT * FROM artifact_chunks WHERE artifact_id = ? AND tenant_id = ? ORDER BY part_number ASC`
+    `SELECT * FROM artifact_chunks WHERE artifact_id = ? AND tenant_id = ?
+     AND upload_status = 'ready' ORDER BY part_number ASC`
   ).bind(candidate.artifact_id, candidate.buyer_tenant_id).all<ChunkRow>();
   if (chunks.results.length === 0) throw new ApiError("ARTIFACT_INTEGRITY_FAILED", "文件任务缺少已验证分块。", 500);
   const instruction = await decryptContent(
@@ -220,7 +266,8 @@ export async function readArtifactTaskChunk(
   const task = await requireLeasedTask(identity, taskId, leaseToken);
   const chunk = await getD1().prepare(
     `SELECT c.* FROM artifact_chunks c
-     WHERE c.artifact_id = ? AND c.tenant_id = ? AND c.part_number = ?`
+     WHERE c.artifact_id = ? AND c.tenant_id = ? AND c.part_number = ?
+       AND c.upload_status = 'ready'`
   ).bind(task.artifact_id, task.buyer_tenant_id, partNumber).first<ChunkRow>();
   if (!chunk) throw new ApiError("NOT_FOUND", "文件分块不存在。", 404);
   const object = await getArtifactBucket().get(chunk.storage_key);
@@ -267,36 +314,59 @@ export async function checkpointArtifactTask(
   const usage = validateUsage(input.usage, task.max_total_tokens);
   if (
     completedSegments > totalSegments || completedSegments < task.completed_segments ||
-    processedBytes < task.processed_bytes || usage.total_tokens < (task.total_tokens ?? 0)
+    processedBytes < task.processed_bytes || usage.input_tokens < (task.input_tokens ?? 0) ||
+    usage.output_tokens < (task.output_tokens ?? 0) || usage.total_tokens < (task.total_tokens ?? 0)
   ) throw new ApiError("CONFLICT", "任务检查点不能倒退或超出任务边界。", 409);
   const now = new Date().toISOString();
-  const leaseExpiresAt = new Date(
-    Date.now() + getMarketplaceRuntimePolicy().artifactLeaseMinutes * 60_000
-  ).toISOString();
+  if (!task.execution_deadline_at) throw invalidLease();
+  const leaseExpiresAt = new Date(Math.min(
+    Date.now() + getMarketplaceRuntimePolicy().artifactLeaseMinutes * 60_000,
+    Date.parse(task.execution_deadline_at)
+  )).toISOString();
   const db = getD1();
-  const updated = await db.prepare(
-    `UPDATE artifact_tasks SET status = 'running', completed_segments = ?, total_segments = ?,
-      processed_bytes = ?, input_tokens = ?, output_tokens = ?, total_tokens = ?,
-      lease_expires_at = ?, updated_at = ?
-     WHERE task_id = ? AND supplier_tenant_id = ? AND lease_digest = ?
-       AND status IN ('claimed', 'running') AND lease_expires_at > ?`
-  ).bind(
-    completedSegments, totalSegments, processedBytes,
-    usage.input_tokens, usage.output_tokens, usage.total_tokens,
-    leaseExpiresAt, now, task.task_id, identity.supplierTenantId,
-    await sha256Hex(input.lease_token), now
-  ).run();
-  if ((updated.meta.changes ?? 0) !== 1) throw invalidLease();
-  await db.prepare(
-    `INSERT INTO artifact_task_checkpoints (
-      checkpoint_id, task_id, attempt, completed_segments, total_segments, processed_bytes,
-      input_tokens, output_tokens, total_tokens, occurred_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    `artifact-checkpoint-${crypto.randomUUID()}`, task.task_id, task.attempt,
-    completedSegments, totalSegments, processedBytes,
-    usage.input_tokens, usage.output_tokens, usage.total_tokens, now
-  ).run();
+  const leaseDigest = await sha256Hex(input.lease_token);
+  const results = await db.batch([
+    db.prepare(
+      `UPDATE artifact_tasks SET status = 'running', completed_segments = ?, total_segments = ?,
+        processed_bytes = ?, input_tokens = ?, output_tokens = ?, total_tokens = ?,
+        lease_expires_at = ?, updated_at = ?
+       WHERE task_id = ? AND supplier_tenant_id = ? AND lease_digest = ?
+         AND status IN ('claimed', 'running') AND cancellation_requested_at IS NULL
+          AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          AND execution_deadline_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          AND completed_segments <= ? AND processed_bytes <= ?
+          AND COALESCE(input_tokens, 0) <= ? AND COALESCE(output_tokens, 0) <= ?
+          AND COALESCE(total_tokens, 0) <= ? AND (total_segments IS NULL OR total_segments = ?)`
+    ).bind(
+      completedSegments, totalSegments, processedBytes,
+      usage.input_tokens, usage.output_tokens, usage.total_tokens,
+      leaseExpiresAt, now, task.task_id, identity.supplierTenantId, leaseDigest,
+      completedSegments, processedBytes, usage.input_tokens, usage.output_tokens,
+      usage.total_tokens, totalSegments
+    ),
+    db.prepare(
+      `INSERT INTO artifact_task_checkpoints (
+        checkpoint_id, task_id, attempt, completed_segments, total_segments, processed_bytes,
+        input_tokens, output_tokens, total_tokens, occurred_at
+      ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM artifact_tasks WHERE task_id = ? AND supplier_tenant_id = ?
+            AND lease_digest = ? AND status = 'running' AND updated_at = ?
+            AND completed_segments = ? AND total_segments = ? AND processed_bytes = ?
+            AND input_tokens = ? AND output_tokens = ? AND total_tokens = ?
+        )`
+    ).bind(
+      `artifact-checkpoint-${crypto.randomUUID()}`, task.task_id, task.attempt,
+      completedSegments, totalSegments, processedBytes,
+      usage.input_tokens, usage.output_tokens, usage.total_tokens, now,
+      task.task_id, identity.supplierTenantId, leaseDigest, now,
+      completedSegments, totalSegments, processedBytes,
+      usage.input_tokens, usage.output_tokens, usage.total_tokens
+    )
+  ]);
+  if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
+    throw invalidLease();
+  }
   return { ok: true, leaseExpiresAt };
 }
 
@@ -356,10 +426,6 @@ export async function completeArtifactTask(
   if (BigInt(settlement.buyerChargeMicros) > BigInt(task.reserved_charge_micros)) {
     throw new ApiError("ARTIFACT_INTEGRITY_FAILED", "最终费用超过任务预留上限。", 409);
   }
-  const balance = await readAvailableLedgerBalance(task.buyer_tenant_id, task.task_id);
-  if (balance < BigInt(settlement.buyerChargeMicros)) {
-    throw new ApiError("INSUFFICIENT_BALANCE", "最终结算时余额不足，平台已阻止扣款。", 409);
-  }
   const now = new Date().toISOString();
   const outputEncrypted = await encryptContent(output, {
     purpose: "artifact-output",
@@ -390,17 +456,17 @@ export async function completeArtifactTask(
     })
   ]);
   const db = getD1();
+  const leaseDigest = await sha256Hex(input.lease_token);
   const statements = [
-    db.prepare(
-      `UPDATE artifact_tasks SET status = 'completed', input_tokens = ?, output_tokens = ?, total_tokens = ?,
-       charge_micros = ?, output_ciphertext = ?, output_iv = ?, content_key_version = ?, output_expires_at = ?,
-       instruction_ciphertext = '', instruction_iv = '',
-       lease_digest = NULL, lease_expires_at = NULL, completed_at = ?, updated_at = ?
-       WHERE task_id = ? AND supplier_tenant_id = ? AND lease_digest = ? AND status IN ('claimed', 'running')`
-    ).bind(
+    db.prepare(COMPLETE_ARTIFACT_TASK_SQL).bind(
       usage.input_tokens, usage.output_tokens, usage.total_tokens, settlement.buyerChargeMicros,
       outputEncrypted.ciphertext, outputEncrypted.iv, outputEncrypted.keyVersion, outputExpiresAt,
-      now, now, task.task_id, identity.supplierTenantId, await sha256Hex(input.lease_token)
+      now, now, task.task_id, identity.supplierTenantId, leaseDigest,
+      task.attempt, task.completed_segments, task.total_segments, task.processed_bytes,
+      task.input_tokens, task.output_tokens, task.total_tokens,
+      settlement.buyerChargeMicros,
+      task.buyer_tenant_id, task.buyer_tenant_id,
+      task.buyer_tenant_id, task.task_id, settlement.buyerChargeMicros
     ),
     db.prepare(
       `INSERT INTO artifact_task_evidence (
@@ -467,10 +533,19 @@ export async function completeArtifactTask(
   }
   await db.batch(statements);
   const recorded = await db.prepare(
-    `SELECT t.status, e.evidence_digest FROM artifact_tasks t
+    `SELECT t.status, t.cancellation_requested_at, e.evidence_digest FROM artifact_tasks t
      LEFT JOIN artifact_task_evidence e ON e.task_id = t.task_id WHERE t.task_id = ?`
-  ).bind(task.task_id).first<{ status: string; evidence_digest: string | null }>();
-  if (recorded?.status !== "completed" || recorded.evidence_digest !== evidenceDigest) throw invalidLease();
+  ).bind(task.task_id).first<{
+    status: string;
+    cancellation_requested_at: string | null;
+    evidence_digest: string | null;
+  }>();
+  if (recorded?.cancellation_requested_at || recorded?.status === "cancelled") {
+    throw new ApiError("ARTIFACT_TASK_CANCELLED", "文件任务已由购买方取消；结果未结算。", 409);
+  }
+  if (recorded?.status !== "completed" || recorded.evidence_digest !== evidenceDigest) {
+    throw new ApiError("INSUFFICIENT_BALANCE", "预留已失效或可用余额不足，平台未写入任何结算记录。", 409);
+  }
   if (task.privacy_mode === "strict") await cleanupExpiredArtifactData(now);
   return { ok: true, taskId: task.task_id, status: "completed", chargeMicros: settlement.buyerChargeMicros };
 }
@@ -490,11 +565,15 @@ export async function failArtifactTask(
   const now = new Date().toISOString();
   const updated = await getD1().prepare(
     `UPDATE artifact_tasks SET status = ?, lease_digest = NULL, lease_expires_at = NULL,
+      execution_deadline_at = NULL,
       error_code = ?,
       instruction_ciphertext = CASE WHEN ? = 1 THEN '' ELSE instruction_ciphertext END,
       instruction_iv = CASE WHEN ? = 1 THEN '' ELSE instruction_iv END,
       updated_at = ?, completed_at = ?
-     WHERE task_id = ? AND supplier_tenant_id = ? AND lease_digest = ? AND status IN ('claimed', 'running')`
+     WHERE task_id = ? AND supplier_tenant_id = ? AND lease_digest = ?
+       AND status IN ('claimed', 'running') AND cancellation_requested_at IS NULL
+       AND lease_expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+       AND execution_deadline_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
   ).bind(
     status, input.code, retry ? 0 : 1, retry ? 0 : 1, now, retry ? null : now,
     task.task_id, identity.supplierTenantId, await sha256Hex(input.lease_token)
@@ -525,14 +604,45 @@ async function requireLeasedTask(
      JOIN artifacts a ON a.artifact_id = t.artifact_id
      JOIN capacity_offers o ON o.offer_id = t.offer_id
      WHERE t.task_id = ? AND t.supplier_tenant_id = ? AND t.lease_digest = ?
-       AND t.lease_expires_at > ? AND t.status IN ('claimed', 'running')`
-  ).bind(taskId, identity.supplierTenantId, leaseDigest, new Date().toISOString()).first<WorkerTaskRow>();
+       AND t.lease_expires_at > ? AND t.execution_deadline_at > ?
+       AND t.status IN ('claimed', 'running')
+       AND t.cancellation_requested_at IS NULL`
+  ).bind(
+    taskId, identity.supplierTenantId, leaseDigest,
+    new Date().toISOString(), new Date().toISOString()
+  ).first<WorkerTaskRow>();
   if (!task) {
     const terminal = await getD1().prepare(
-      "SELECT status FROM artifact_tasks WHERE task_id = ? AND supplier_tenant_id = ?"
-    ).bind(taskId, identity.supplierTenantId).first<{ status: string }>();
+      `SELECT status, cancellation_requested_at, privacy_mode, artifact_id, lease_digest
+       FROM artifact_tasks WHERE task_id = ? AND supplier_tenant_id = ?`
+    ).bind(taskId, identity.supplierTenantId).first<{
+      status: string;
+      cancellation_requested_at: string | null;
+      privacy_mode: "standard" | "strict";
+      artifact_id: string;
+      lease_digest: string | null;
+    }>();
+    if (terminal?.cancellation_requested_at && terminal.lease_digest === leaseDigest) {
+      const now = new Date().toISOString();
+      await getD1().batch([
+        getD1().prepare(
+          `UPDATE artifact_tasks SET status = 'cancelled', lease_digest = NULL, lease_expires_at = NULL,
+             execution_deadline_at = NULL,
+             error_code = 'USER_CANCELLED', completed_at = COALESCE(completed_at, ?), updated_at = ?
+           WHERE task_id = ? AND supplier_tenant_id = ? AND lease_digest = ?
+             AND cancellation_requested_at IS NOT NULL AND status IN ('claimed', 'running')`
+        ).bind(now, now, taskId, identity.supplierTenantId, leaseDigest),
+        getD1().prepare(
+          `UPDATE artifacts SET expires_at = ?, updated_at = ?
+           WHERE artifact_id = ? AND privacy_mode = 'strict'
+             AND EXISTS (SELECT 1 FROM artifact_tasks WHERE task_id = ? AND status = 'cancelled')`
+        ).bind(now, now, terminal.artifact_id, taskId)
+      ]);
+      if (terminal.privacy_mode === "strict") await cleanupExpiredArtifactData(now);
+      throw new ApiError("ARTIFACT_TASK_CANCELLED", "文件任务已由购买方取消；平台不会接收或结算后续结果。", 409);
+    }
     if (terminal?.status === "cancelled") {
-      throw new ApiError("ARTIFACT_TASK_CANCELLED", "文件任务已由购买方取消并清除内容。", 409);
+      throw new ApiError("ARTIFACT_TASK_CANCELLED", "文件任务已由购买方取消；平台不会接收或结算后续结果。", 409);
     }
     throw invalidLease();
   }
@@ -576,7 +686,7 @@ function guardedLedgerInsert(
   evidenceDigest: string
 ): D1PreparedStatement {
   return getD1().prepare(
-    `INSERT INTO ledger_entries (
+    `INSERT OR IGNORE INTO ledger_entries (
       entry_id, tenant_id, account_id, job_id, entry_type, direction, amount_micros, currency, created_at
     ) SELECT ?, ?, ?, ?, ?, ?, ?, 'CNY', ?
       WHERE EXISTS (SELECT 1 FROM artifact_task_evidence WHERE task_id = ? AND evidence_digest = ?)`
@@ -584,17 +694,6 @@ function guardedLedgerInsert(
     `ledger-${crypto.randomUUID()}`, tenantId, accountId, taskId, entryType, direction, amountMicros, createdAt,
     taskId, evidenceDigest
   );
-}
-
-async function readAvailableLedgerBalance(tenantId: string, currentTaskId: string): Promise<bigint> {
-  const row = await getD1().prepare(
-    `SELECT
-      COALESCE((SELECT SUM(CASE WHEN direction = 'credit' THEN CAST(amount_micros AS INTEGER)
-        ELSE -CAST(amount_micros AS INTEGER) END) FROM ledger_entries WHERE tenant_id = ?), 0) AS balance,
-      COALESCE((SELECT SUM(CAST(reserved_charge_micros AS INTEGER)) FROM artifact_tasks
-        WHERE buyer_tenant_id = ? AND task_id <> ? AND status IN ('queued', 'claimed', 'running')), 0) AS reserved`
-  ).bind(tenantId, tenantId, currentTaskId).first<{ balance: number; reserved: number }>();
-  return BigInt(row?.balance ?? 0) - BigInt(row?.reserved ?? 0);
 }
 
 function exactModels(value: unknown): string[] {

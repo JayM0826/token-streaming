@@ -1,9 +1,10 @@
 import { SUPPLIER_GATEWAY_HEADERS, createSupplierGatewaySignaturePayload } from "@token-streaming/protocol";
 
 import { ensureSchema, getD1 } from "@/db";
-import { ApiError } from "./http";
+import { ApiError, readBoundedText } from "./http";
 import { enforceScopeRateLimit } from "./rate-limit";
-import { sha256Hex } from "./security";
+import { createCredentialLookupDigest, sha256Hex } from "./security";
+import { INSERT_AGENT_NONCE_SQL } from "./agent-auth-invariants";
 
 export interface AgentAuthorizationIdentity {
   credentialDigest: string;
@@ -24,6 +25,7 @@ interface AgentAuthorizationRow {
   supplier_id: string;
   provider_id: string;
   model_pattern: string;
+  gateway_token_digest_version: number;
 }
 
 export async function readSignedAgentJson<T>(
@@ -34,8 +36,9 @@ export async function readSignedAgentJson<T>(
   if (contentType !== "application/json") throw new ApiError("INVALID_REQUEST", "Agent 请求必须使用 application/json。", 415);
   const declared = Number(request.headers.get("content-length") ?? 0);
   if (Number.isFinite(declared) && declared > maximumBytes) throw new ApiError("INVALID_REQUEST", "Agent 请求超过大小限制。", 413);
-  const rawBody = await request.text();
-  if (new TextEncoder().encode(rawBody).byteLength > maximumBytes) throw new ApiError("INVALID_REQUEST", "Agent 请求超过大小限制。", 413);
+  const rawBody = await readBoundedText(request, maximumBytes, () =>
+    new ApiError("INVALID_REQUEST", "Agent 请求超过大小限制。", 413)
+  );
   let body: T;
   try {
     body = JSON.parse(rawBody) as T;
@@ -51,21 +54,32 @@ export async function authenticateAgentRequest(
 ): Promise<AgentAuthorizationIdentity> {
   await ensureSchema();
   const gatewayToken = bearerToken(request.headers.get("authorization"));
-  const credentialDigest = await sha256Hex(gatewayToken);
+  const edgeAddress = request.headers.get("cf-connecting-ip")?.trim() || "edge-address-unavailable";
+  const [credentialLookup, legacyCredentialDigest, preAuthScope] = await Promise.all([
+    createCredentialLookupDigest(gatewayToken),
+    sha256Hex(gatewayToken),
+    createCredentialLookupDigest(`agent-edge:${edgeAddress}`)
+  ]);
+  const credentialDigest = credentialLookup.digest;
+  await enforceScopeRateLimit(
+    `agent-auth-${preAuthScope.digest.slice(0, 48)}`,
+    "agent.authentication",
+    120,
+    5 * 60_000
+  );
   const db = getD1();
-  const result = await db.prepare(
-    `SELECT ar.request_id, ar.tenant_id, ar.supplier_id, ar.provider_id, ar.model_pattern
+  const now = new Date().toISOString();
+  const resultPromise = db.prepare(
+    `SELECT ar.request_id, ar.tenant_id, ar.supplier_id, ar.provider_id, ar.model_pattern,
+       ar.gateway_token_digest_version
      FROM authorization_requests ar
      JOIN suppliers s ON s.supplier_id = ar.supplier_id AND s.tenant_id = ar.tenant_id
-     WHERE ar.gateway_token_digest = ? AND ar.status = 'approved'
+     WHERE ((ar.gateway_token_digest_version = 2 AND ar.gateway_token_digest = ?)
+         OR (ar.gateway_token_digest_version = 1 AND ar.gateway_token_digest = ?))
+       AND ar.status = 'approved' AND ar.valid_until > ?
        AND s.status = 'active' AND s.supply_enabled = 1
      ORDER BY ar.created_at ASC LIMIT 100`
-  ).bind(credentialDigest).all<AgentAuthorizationRow>();
-  if (result.results.length === 0) throw new ApiError("AUTHENTICATION_REQUIRED", "Agent 凭据未获授权或供应已经关闭。", 401);
-  const first = result.results[0]!;
-  if (result.results.some((row) => row.tenant_id !== first.tenant_id || row.supplier_id !== first.supplier_id)) {
-    throw new ApiError("INTERNAL_ERROR", "Agent 凭据错误地绑定了多个供应主体。", 500);
-  }
+  ).bind(credentialDigest, legacyCredentialDigest, now).all<AgentAuthorizationRow>();
 
   const timestamp = requiredHeader(request, SUPPLIER_GATEWAY_HEADERS.timestamp, /^\d{13}$/);
   const nonce = requiredHeader(request, SUPPLIER_GATEWAY_HEADERS.nonce, /^[A-Za-z0-9_-]{16,128}$/);
@@ -73,7 +87,7 @@ export async function authenticateAgentRequest(
   const signature = requiredHeader(request, SUPPLIER_GATEWAY_HEADERS.signature, /^[a-f0-9]{64}$/);
   const timestampMs = Number(timestamp);
   if (!Number.isSafeInteger(timestampMs) || Math.abs(Date.now() - timestampMs) > 5 * 60_000) {
-    throw new ApiError("AUTHENTICATION_REQUIRED", "Agent 请求时间戳已过期。", 401);
+    throw agentAuthenticationFailed();
   }
   const bodySha256 = await sha256Hex(rawBody);
   const key = await crypto.subtle.importKey(
@@ -83,24 +97,42 @@ export async function authenticateAgentRequest(
     false,
     ["verify"]
   );
-  const matches = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    hexToArrayBuffer(signature),
-    new TextEncoder().encode(createSupplierGatewaySignaturePayload({ timestamp, nonce, jobId, bodySha256 }))
-  );
-  if (!matches) throw new ApiError("AUTHENTICATION_REQUIRED", "Agent 请求签名无效。", 401);
+  const [matches, result] = await Promise.all([
+    crypto.subtle.verify(
+      "HMAC",
+      key,
+      hexToArrayBuffer(signature),
+      new TextEncoder().encode(createSupplierGatewaySignaturePayload({ timestamp, nonce, jobId, bodySha256 }))
+    ),
+    resultPromise
+  ]);
+  if (!matches || result.results.length === 0) throw agentAuthenticationFailed();
+  const first = result.results[0]!;
+  if (result.results.some((row) => row.tenant_id !== first.tenant_id || row.supplier_id !== first.supplier_id)) {
+    throw new ApiError("INTERNAL_ERROR", "Agent 凭据错误地绑定了多个供应主体。", 500);
+  }
   await enforceScopeRateLimit(`agent-${credentialDigest}`, "agent.signed-request", 600, 5 * 60_000);
-  const now = new Date().toISOString();
+  const legacyRows = result.results.filter((row) => row.gateway_token_digest_version === 1);
+  if (legacyRows.length > 0) {
+    await db.batch(legacyRows.map((row) => db.prepare(
+      `UPDATE authorization_requests SET gateway_token_digest = ?, gateway_token_digest_version = 2,
+         updated_at = ? WHERE request_id = ? AND gateway_token_digest_version = 1
+         AND gateway_token_digest = ?`
+    ).bind(credentialDigest, now, row.request_id, legacyCredentialDigest)));
+  }
   await db.prepare(
     `DELETE FROM agent_request_nonces WHERE rowid IN (
        SELECT rowid FROM agent_request_nonces WHERE expires_at < ? ORDER BY expires_at ASC LIMIT 100
      )`
   ).bind(now).run();
-  const inserted = await db.prepare(
-    "INSERT OR IGNORE INTO agent_request_nonces (credential_digest, nonce, expires_at) VALUES (?, ?, ?)"
-  ).bind(credentialDigest, nonce, new Date(timestampMs + 5 * 60_000).toISOString()).run();
-  if ((inserted.meta.changes ?? 0) !== 1) throw new ApiError("CONFLICT", "Agent 请求 nonce 已经使用。", 409);
+  const nonceExpiresAt = new Date(timestampMs + 5 * 60_000).toISOString();
+  const inserted = await db.batch([
+    db.prepare(INSERT_AGENT_NONCE_SQL).bind(credentialDigest, nonce, nonceExpiresAt),
+    db.prepare(INSERT_AGENT_NONCE_SQL).bind(legacyCredentialDigest, nonce, nonceExpiresAt)
+  ]);
+  if (inserted.some((result) => (result.meta.changes ?? 0) !== 1)) {
+    throw new ApiError("CONFLICT", "Agent 请求 nonce 已经使用。", 409);
+  }
   return {
     credentialDigest,
     gatewayToken,
@@ -116,18 +148,23 @@ export async function authenticateAgentRequest(
 }
 
 function bearerToken(value: string | null): string {
-  if (!value?.startsWith("Bearer ")) throw new ApiError("AUTHENTICATION_REQUIRED", "Agent 缺少身份凭据。", 401);
+  if (!value?.startsWith("Bearer ")) throw agentAuthenticationFailed();
   const token = value.slice("Bearer ".length);
-  if (token.length < 32 || token.length > 4_096 || token.trim() !== token) {
-    throw new ApiError("AUTHENTICATION_REQUIRED", "Agent 身份凭据无效。", 401);
-  }
+  // Version-1 authorizations accepted a wider token format. Keep those usable
+  // until their explicit validUntil while all newly submitted v2 credentials
+  // remain subject to the stronger generator/validator at creation time.
+  if (token.length < 32 || token.length > 4096 || token.trim() !== token) throw agentAuthenticationFailed();
   return token;
 }
 
 function requiredHeader(request: Request, name: string, pattern: RegExp): string {
   const value = request.headers.get(name);
-  if (!value || !pattern.test(value)) throw new ApiError("INVALID_REQUEST", `Agent 请求头 ${name} 无效。`, 400);
+  if (!value || !pattern.test(value)) throw agentAuthenticationFailed();
   return value;
+}
+
+function agentAuthenticationFailed(): ApiError {
+  return new ApiError("AUTHENTICATION_REQUIRED", "Agent 身份验证失败。", 401);
 }
 
 function hexToArrayBuffer(value: string): ArrayBuffer {

@@ -17,6 +17,10 @@
 
 控制面继续保存加密的节点共享令牌，但永不接收节点的上游 Provider API Key。客户推理不会经过开发者本地 Codex 会话。
 
+## 后续演进说明
+
+本 ADR 记录的 v2“幂等结果仅保留在内存”不再代表当前 v3 的完整重放边界。当前 supplier-node 仍把可返回的结果限制在进程内十五分钟，但 nonce 与 request claim 必须先写入 journal v2 并 fsync；`SupplierNodeConfig.replayJournalPath` 必须解析为非空持久路径，缺失时拒绝启动，不允许静默退化为仅内存防重放。journal v1 的活动记录在启动时迁移为由网关令牌分域 HMAC 承诺请求体摘要的 v2 记录。当前持久 journal 每个 gateway token 只允许一个 active writer；仅共享文件或 Docker volume 不构成 active-active HA，后者需要共享原子 nonce/request-claim 存储。
+
 ## 后果
 
 - v2 是对 v1 的破坏性协议升级；当前闭测尚无获批真实 v1 节点，因此控制面直接切换并拒绝旧版本。
