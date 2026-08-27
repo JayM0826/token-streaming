@@ -21,9 +21,9 @@ function PublicLanding() {
         <a className="brand" href="#top" aria-label="共算云首页">
           <span className="brand-mark"><i /><i /><i /></span>
           <span className="brand-name">共算云</span>
-          <span className="brand-beta">CLOSED BETA</span>
+          <span className="brand-beta">PUBLIC BETA</span>
         </a>
-        <a className="primary-button" href={chatGPTSignInPath("/")}>登录试运营控制台</a>
+        <a className="primary-button" href={chatGPTSignInPath("/")}>登录公开 Beta 控制台</a>
       </nav>
 
       <section className="landing-hero" id="top">
@@ -35,7 +35,7 @@ function PublicLanding() {
             <a className="primary-button large" href={chatGPTSignInPath("/")}>使用 ChatGPT 账号进入</a>
             <InstallAppButton />
             <a className="privacy-link" href="/privacy">隐私与安全边界</a>
-            <span>封闭试运营 · 仅 P0 / P1 数据</span>
+            <span>公开技术 Beta · 仅 P0 / P1 数据</span>
           </div>
         </div>
         <div className="landing-proof" aria-label="运行边界">

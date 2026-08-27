@@ -2,7 +2,7 @@
 
 `@token-streaming/web` is the Sites-hosted Web entry point and deployment composition root for the authorized-capacity marketplace. It provides a public sign-in entry, authenticated buyer/supplier workspaces, versioned JSON routes, D1 persistence, and server-only integration with the headless marketplace domain.
 
-## Closed-beta capabilities
+## Public technical-beta capabilities
 
 - ChatGPT sign-in with server-derived tenant and actor identities.
 - Individual and organization supplier registration.
@@ -64,7 +64,7 @@ Artifact storage additionally requires a separate 32-byte base64 `MARKETPLACE_AR
 
 Encryption at rest is not execution secrecy: the matched Supplier Agent and its upstream Provider receive plaintext while running a task. Customers requiring execution-party confidentiality must use a customer-controlled node or a future remotely attested confidential-computing tier.
 
-The current balance is a closed-beta promotional balance. Cash collection, tax invoicing, KYC/KYB evidence storage, and payouts require external regulated providers before public commercial launch.
+The current balance is a public technical-beta promotional balance. Cash collection, tax invoicing, KYC/KYB evidence storage, and payouts require external regulated providers before public commercial launch.
 
 The `node-signed-provider-response` assurance level proves that the hardened supplier-node observed and signed the upstream response model; it is not independent cryptographic proof from the upstream Provider. Stronger future tiers require official provider-signed receipts, platform-managed provider accounts, or attested confidential-computing workers.
 
