@@ -3,10 +3,9 @@ import { cleanupExpiredArtifactData } from "./artifact-service";
 import { ApiError } from "./http";
 import { getMarketplaceRuntimePolicy } from "./runtime-policy";
 import {
+  assertAppliedCredentialKeyringManifestState,
   assertCredentialEncryptionKeyCanary,
   assertRuntimeCryptographicConfiguration,
-  createCredentialEncryptionKeyCanary,
-  createCredentialLookupDigest,
   createCredentialLookupKeyCanary,
   decryptCredential,
   encryptCredential,
@@ -32,14 +31,19 @@ export interface MarketplaceMaintenanceResult {
   expiredInferenceOutputs: number;
   expiredPendingAuthorizations: number;
   expiredCredentials: number;
+  scrubbedLifecycleCredentials: number;
   rotatedCredentialEncryptions: number;
   credentialEncryptionRotationBacklog: number;
   legacyCredentialContentReferences: number;
   credentialLookupRotationBacklog: number;
   credentialActiveKeyId: string;
   credentialReadableKeyCount: number;
+  credentialConfigurationGeneration: number | null;
+  credentialStagedKeyCount: number;
   credentialLookupActiveKeyId: string;
   credentialLookupReadableKeyCount: number;
+  credentialLookupConfigurationGeneration: number | null;
+  credentialLookupStagedKeyCount: number;
   credentialLookupSeparated: boolean;
   scrubbedIdentityRows: number;
   expiredRateLimits: number;
@@ -59,16 +63,36 @@ export interface MarketplaceMaintenanceResult {
   cryptographicCanaries: "valid";
 }
 
+const preflightAuthenticationBuckets = new Map<string, { count: number; expiresAt: number }>();
+
 export async function requireMaintenanceAuthorization(request: Request): Promise<void> {
   const edgeAddress = request.headers.get("cf-connecting-ip")?.trim() || "edge-address-unavailable";
-  const preAuthScope = await createCredentialLookupDigest(`maintenance-edge:${edgeAddress}`);
+  // The diagnostic path must remain reachable when the credential lookup ring
+  // itself is the broken component. This non-secret scope is used only as a
+  // durable rate-limit bucket; bearer comparison still happens below.
+  const preAuthScope = await sha256Hex(`maintenance-edge:${edgeAddress}`);
   await enforceScopeRateLimit(
-    `maintenance-auth-${preAuthScope.digest.slice(0, 48)}`,
+    `maintenance-auth-${preAuthScope.slice(0, 48)}`,
     "maintenance.authentication",
     30,
     5 * 60_000
   );
+  await assertMaintenanceBearer(request);
+}
+
+export async function requireCryptographicPreflightAuthorization(request: Request): Promise<void> {
+  const edgeAddress = request.headers.get("cf-connecting-ip")?.trim() || "edge-address-unavailable";
   const configured = getRuntimeEnv().MARKETPLACE_MAINTENANCE_KEY;
+  if (!configured) unauthorized();
+  const scope = (await maintenanceScopeDigest(configured, edgeAddress)).slice(0, 48);
+  enforceReadOnlyPreflightRateLimit(scope);
+  await assertMaintenanceBearer(request, configured);
+}
+
+async function assertMaintenanceBearer(
+  request: Request,
+  configured = getRuntimeEnv().MARKETPLACE_MAINTENANCE_KEY
+): Promise<void> {
   const authorization = request.headers.get("authorization");
   if (!configured || !authorization?.startsWith("Bearer ")) unauthorized();
   const candidate = authorization.slice("Bearer ".length);
@@ -80,14 +104,52 @@ export async function requireMaintenanceAuthorization(request: Request): Promise
   if (!constantTimeEqual(expectedDigest, candidateDigest)) unauthorized();
 }
 
+async function maintenanceScopeDigest(secret: string, edgeAddress: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const digest = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`gongsuanyun.maintenance-preflight.v1\n${edgeAddress}`)
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function enforceReadOnlyPreflightRateLimit(scope: string, now = Date.now()): void {
+  const existing = preflightAuthenticationBuckets.get(scope);
+  if (existing && existing.expiresAt > now) {
+    existing.count += 1;
+    if (existing.count > 30) {
+      throw new ApiError("RATE_LIMITED", "密码学预检认证请求过于频繁。", 429, true);
+    }
+    return;
+  }
+  for (const [key, bucket] of preflightAuthenticationBuckets) {
+    if (bucket.expiresAt <= now) preflightAuthenticationBuckets.delete(key);
+  }
+  if (preflightAuthenticationBuckets.size >= 2_048) {
+    const oldest = preflightAuthenticationBuckets.keys().next().value as string | undefined;
+    if (oldest) preflightAuthenticationBuckets.delete(oldest);
+  }
+  preflightAuthenticationBuckets.set(scope, { count: 1, expiresAt: now + 5 * 60_000 });
+}
+
 export async function runMarketplaceMaintenance(
   now = new Date().toISOString()
 ): Promise<MarketplaceMaintenanceResult> {
   const cryptographicConfiguration = await assertRuntimeCryptographicConfiguration();
+  await assertAppliedCredentialKeyringManifestState();
   await ensureSchema();
   const db = getD1();
   const keyringInventory = await getCredentialKeyringInventory();
-  await ensureCredentialKeyCanaries(keyringInventory, now);
+  await assertCredentialKeyCanaries(keyringInventory);
   const legacyCredentialContentReferences = await assertReferencedCredentialKeysAvailable(
     keyringInventory
   );
@@ -123,6 +185,13 @@ export async function runMarketplaceMaintenance(
          encrypted_gateway_token <> '' OR gateway_token_iv <> '' OR gateway_token_digest IS NOT NULL
       )`
     ).bind(now, now),
+    db.prepare(
+      `UPDATE authorization_requests SET encrypted_gateway_token = '', gateway_token_iv = '',
+         gateway_token_digest = NULL, updated_at = ?
+       WHERE status IN ('withdrawn', 'revoked') AND (
+         encrypted_gateway_token <> '' OR gateway_token_iv <> '' OR gateway_token_digest IS NOT NULL
+       )`
+    ).bind(now),
     db.prepare(
       `UPDATE users SET email = 'redacted@identity.invalid', display_name = '平台成员', updated_at = ?
        WHERE email <> 'redacted@identity.invalid' OR display_name <> '平台成员'`
@@ -191,19 +260,25 @@ export async function runMarketplaceMaintenance(
     expiredInferenceOutputs: results[1]?.meta.changes ?? 0,
     expiredPendingAuthorizations: results[2]?.meta.changes ?? 0,
     expiredCredentials: results[3]?.meta.changes ?? 0,
+    scrubbedLifecycleCredentials: results[4]?.meta.changes ?? 0,
     rotatedCredentialEncryptions,
     credentialEncryptionRotationBacklog: rotationBacklog?.credential_backlog ?? 0,
     legacyCredentialContentReferences,
     credentialLookupRotationBacklog: rotationBacklog?.lookup_backlog ?? 0,
     credentialActiveKeyId: cryptographicConfiguration.credentialActiveKeyId,
     credentialReadableKeyCount: cryptographicConfiguration.credentialReadableKeyCount,
+    credentialConfigurationGeneration: cryptographicConfiguration.credentialConfigurationGeneration,
+    credentialStagedKeyCount: cryptographicConfiguration.credentialStagedKeyCount,
     credentialLookupActiveKeyId: cryptographicConfiguration.credentialLookupActiveKeyId,
     credentialLookupReadableKeyCount: cryptographicConfiguration.credentialLookupReadableKeyCount,
+    credentialLookupConfigurationGeneration:
+      cryptographicConfiguration.credentialLookupConfigurationGeneration,
+    credentialLookupStagedKeyCount: cryptographicConfiguration.credentialLookupStagedKeyCount,
     credentialLookupSeparated: cryptographicConfiguration.credentialLookupSeparated,
-    scrubbedIdentityRows: results[4]?.meta.changes ?? 0,
-    expiredRateLimits: results[5]?.meta.changes ?? 0,
-    expiredAgentNonces: results[6]?.meta.changes ?? 0,
-    expiredWorkerHeartbeats: results[7]?.meta.changes ?? 0,
+    scrubbedIdentityRows: results[5]?.meta.changes ?? 0,
+    expiredRateLimits: results[6]?.meta.changes ?? 0,
+    expiredAgentNonces: results[7]?.meta.changes ?? 0,
+    expiredWorkerHeartbeats: results[8]?.meta.changes ?? 0,
     artifactDeletionBacklog: deletionQueue?.backlog ?? 0,
     overdueArtifactDeletions: deletionQueue?.overdue ?? 0,
     oldestArtifactDeletionDueAt: deletionQueue?.oldest_due_at ?? null,
@@ -232,25 +307,13 @@ interface CryptographicKeyCanaryRow {
   iv: string | null;
 }
 
-async function ensureCredentialKeyCanaries(
-  inventory: CredentialKeyringInventoryView,
-  now: string
+async function assertCredentialKeyCanaries(
+  inventory: CredentialKeyringInventoryView
 ): Promise<void> {
   for (const keyId of inventory.credentialKeyIds) {
-    let row = await readKeyCanary("credential-encryption", keyId);
-    if (!row) {
-      const canary = await createCredentialEncryptionKeyCanary(keyId);
-      await insertKeyCanary(
-        "credential-encryption",
-        keyId,
-        canary.formatVersion,
-        canary.ciphertext,
-        canary.iv,
-        now
-      );
-      row = await readKeyCanary("credential-encryption", keyId);
-    }
-    if (!row?.iv || row.format_version !== 1) invalidCryptographicCanary();
+    const row = await readKeyCanary("credential-encryption", keyId);
+    if (!row) missingCryptographicCanary();
+    if (!row.iv || row.format_version !== 1) invalidCryptographicCanary();
     try {
       await assertCredentialEncryptionKeyCanary(keyId, {
         ciphertext: row.ciphertext,
@@ -263,13 +326,10 @@ async function ensureCredentialKeyCanaries(
   }
   for (const keyId of inventory.credentialLookupKeyIds) {
     const expected = await createCredentialLookupKeyCanary(keyId);
-    let row = await readKeyCanary("credential-lookup", keyId);
-    if (!row) {
-      await insertKeyCanary("credential-lookup", keyId, 1, expected, null, now);
-      row = await readKeyCanary("credential-lookup", keyId);
-    }
+    const row = await readKeyCanary("credential-lookup", keyId);
+    if (!row) missingCryptographicCanary();
     if (
-      !row || row.iv !== null || row.format_version !== 1 ||
+      row.iv !== null || row.format_version !== 1 ||
       !constantTimeEqual(expected, row.ciphertext)
     ) invalidCryptographicCanary();
   }
@@ -283,21 +343,6 @@ async function readKeyCanary(
     `SELECT format_version, ciphertext, iv FROM cryptographic_key_canaries
      WHERE domain = ? AND key_id = ?`
   ).bind(domain, keyId).first<CryptographicKeyCanaryRow>();
-}
-
-async function insertKeyCanary(
-  domain: "credential-encryption" | "credential-lookup",
-  keyId: string,
-  formatVersion: number,
-  ciphertext: string,
-  iv: string | null,
-  now: string
-): Promise<void> {
-  await getD1().prepare(
-    `INSERT OR IGNORE INTO cryptographic_key_canaries (
-       canary_id, domain, key_id, format_version, ciphertext, iv, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).bind(`canary:${domain}:${keyId}`, domain, keyId, formatVersion, ciphertext, iv, now).run();
 }
 
 async function assertReferencedCredentialKeysAvailable(
@@ -341,7 +386,7 @@ async function assertReferencedCredentialKeysAvailable(
     (invalidReferences?.reference_count ?? 0) > 0
   ) {
     throw new ApiError(
-      "INTERNAL_ERROR",
+      "CRYPTO_REFERENCED_KEY_MISSING",
       "生产密钥环缺少仍被持久化数据引用的凭据密钥。",
       503,
       true
@@ -410,8 +455,17 @@ function unauthorized(): never {
 
 function invalidCryptographicCanary(): never {
   throw new ApiError(
-    "INTERNAL_ERROR",
+    "CRYPTO_CANARY_MISMATCH",
     "生产密钥材料与已登记的密钥 canary 不一致。",
+    503,
+    true
+  );
+}
+
+function missingCryptographicCanary(): never {
+  throw new ApiError(
+    "CRYPTO_CANARY_MISSING",
+    "生产可读密钥缺少已登记的持久 canary。",
     503,
     true
   );

@@ -1,15 +1,19 @@
 import { getChatGPTUser, type ChatGPTUser } from "@/app/chatgpt-auth";
-import { getRuntimeEnv } from "@/db";
+import { getD1, getRuntimeEnv } from "@/db";
 import { ApiError } from "./http";
 import {
+  assertVersionedKeyringVerifiers,
+  createKeyCustodyVerifier,
   KeyringConfigurationError,
   resolveLegacyKeyAliasEnabled,
   resolveVersionedKeyring,
+  type VersionedKeyMetadata,
   type ResolvedVersionedKeyring
 } from "./keyring";
 
 export const LEGACY_CREDENTIAL_KEY_ID = "legacy-credential-v2";
 export const LEGACY_CREDENTIAL_LOOKUP_KEY_ID = "legacy-commitment-v2";
+export const MARKETPLACE_CRYPTO_READER_VERSION = 3;
 
 export interface RequestIdentity {
   user: ChatGPTUser;
@@ -181,29 +185,68 @@ export async function createDigestCommitment(
 export interface RuntimeCryptographicConfiguration {
   credentialActiveKeyId: string;
   credentialReadableKeyCount: number;
+  credentialConfigurationGeneration: number | null;
+  credentialStagedKeyCount: number;
   credentialLookupActiveKeyId: string;
   credentialLookupReadableKeyCount: number;
+  credentialLookupConfigurationGeneration: number | null;
+  credentialLookupStagedKeyCount: number;
   credentialLookupSeparated: boolean;
 }
 
 export interface CredentialKeyringInventory {
   credentialActiveKeyId: string;
   credentialKeyIds: readonly string[];
+  credentialStagedKeyIds: readonly string[];
+  credentialConfigurationGeneration: number | null;
+  credentialCanonicalManifest: string | null;
+  credentialKeyMetadata: readonly VersionedKeyMetadata[];
   credentialLookupActiveKeyId: string;
   credentialLookupKeyIds: readonly string[];
+  credentialLookupStagedKeyIds: readonly string[];
+  credentialLookupConfigurationGeneration: number | null;
+  credentialLookupCanonicalManifest: string | null;
+  credentialLookupKeyMetadata: readonly VersionedKeyMetadata[];
 }
 
 export async function getCredentialKeyringInventory(): Promise<CredentialKeyringInventory> {
   const [credentials, lookups] = await Promise.all([
-    credentialKeyring(),
-    credentialLookupKeyring()
+    credentialKeyring(false),
+    credentialLookupKeyring(false)
   ]);
   return {
     credentialActiveKeyId: credentials.activeKeyId,
     credentialKeyIds: credentials.keyIds,
+    credentialStagedKeyIds: credentials.stagedKeyIds,
+    credentialConfigurationGeneration: credentials.configurationGeneration,
+    credentialCanonicalManifest: credentials.canonicalManifest,
+    credentialKeyMetadata: credentials.allKeyIds.map((keyId) => credentials.keyMetadata(keyId)),
     credentialLookupActiveKeyId: lookups.activeKeyId,
-    credentialLookupKeyIds: lookups.keyIds
+    credentialLookupKeyIds: lookups.keyIds,
+    credentialLookupStagedKeyIds: lookups.stagedKeyIds,
+    credentialLookupConfigurationGeneration: lookups.configurationGeneration,
+    credentialLookupCanonicalManifest: lookups.canonicalManifest,
+    credentialLookupKeyMetadata: lookups.allKeyIds.map((keyId) => lookups.keyMetadata(keyId))
   };
+}
+
+/**
+ * Returns only the non-secret verifier for one already configured runtime key.
+ * The fresh-database baseline endpoint compares this with an independently
+ * recorded recovery-system verifier before it can create the first canary.
+ */
+export async function createRuntimeKeyCustodyVerifier(
+  domain: "credential-encryption" | "credential-lookup",
+  keyId: string
+): Promise<string> {
+  const keyring = domain === "credential-encryption"
+    ? await credentialKeyring(false)
+    : await credentialLookupKeyring(false);
+  return createKeyCustodyVerifier(domain, keyId, keyring.verificationKeyBytes(keyId));
+}
+
+export async function assertAppliedCredentialKeyringManifestState(): Promise<void> {
+  await Promise.all([credentialKeyring(true), credentialLookupKeyring(true)]);
 }
 
 export interface CredentialEncryptionKeyCanary {
@@ -217,10 +260,10 @@ const CREDENTIAL_CANARY_PLAINTEXT = "gongsuanyun.credential-key-canary.v1";
 export async function createCredentialEncryptionKeyCanary(
   keyId: string
 ): Promise<CredentialEncryptionKeyCanary> {
-  const keyring = await credentialKeyring();
+  const keyring = await credentialKeyring(false);
   const encrypted = await encryptText(
     CREDENTIAL_CANARY_PLAINTEXT,
-    await importAesKey(referencedKeyBytes(keyring, keyId)),
+    await importAesKey(referencedVerificationKeyBytes(keyring, keyId)),
     keyCanaryAdditionalData("credential-encryption", keyId)
   );
   return { ...encrypted, formatVersion: 1 };
@@ -231,21 +274,21 @@ export async function assertCredentialEncryptionKeyCanary(
   canary: CredentialEncryptionKeyCanary
 ): Promise<void> {
   if (canary.formatVersion !== 1) invalidRuntimeKeyConfiguration();
-  const keyring = await credentialKeyring();
+  const keyring = await credentialKeyring(false);
   const plaintext = await decryptText(
     canary.ciphertext,
     canary.iv,
-    await importAesKey(referencedKeyBytes(keyring, keyId)),
+    await importAesKey(referencedVerificationKeyBytes(keyring, keyId)),
     keyCanaryAdditionalData("credential-encryption", keyId)
   );
   if (plaintext !== CREDENTIAL_CANARY_PLAINTEXT) invalidRuntimeKeyConfiguration();
 }
 
 export async function createCredentialLookupKeyCanary(keyId: string): Promise<string> {
-  const keyring = await credentialLookupKeyring();
+  const keyring = await credentialLookupKeyring(false);
   const key = await crypto.subtle.importKey(
     "raw",
-    referencedKeyBytes(keyring, keyId),
+    referencedVerificationKeyBytes(keyring, keyId),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
@@ -262,20 +305,20 @@ export async function createCredentialLookupKeyCanary(keyId: string): Promise<st
  */
 export async function assertRuntimeCryptographicConfiguration(): Promise<RuntimeCryptographicConfiguration> {
   const [credentials, lookups, contentBytes, artifactBytes, commitmentBytes] = await Promise.all([
-    credentialKeyring(),
-    credentialLookupKeyring(),
+    credentialKeyring(false),
+    credentialLookupKeyring(false),
     contentKeyBytes(),
     artifactKeyBytes(),
     commitmentKeyBytes()
   ]);
   const materials: Array<{ label: string; fingerprint: string }> = [
-    ...credentials.keyIds.map((keyId) => ({
+    ...credentials.allKeyIds.map((keyId) => ({
       label: `credential:${keyId}`,
-      fingerprint: bytesToHex(credentials.keyBytes(keyId))
+      fingerprint: bytesToHex(credentials.verificationKeyBytes(keyId))
     })),
-    ...lookups.keyIds.map((keyId) => ({
+    ...lookups.allKeyIds.map((keyId) => ({
       label: `lookup:${keyId}`,
-      fingerprint: bytesToHex(lookups.keyBytes(keyId))
+      fingerprint: bytesToHex(lookups.verificationKeyBytes(keyId))
     })),
     { label: "content", fingerprint: bytesToHex(contentBytes) },
     { label: "artifact", fingerprint: bytesToHex(artifactBytes) },
@@ -306,8 +349,12 @@ export async function assertRuntimeCryptographicConfiguration(): Promise<Runtime
   return {
     credentialActiveKeyId: credentials.activeKeyId,
     credentialReadableKeyCount: credentials.keyIds.length,
+    credentialConfigurationGeneration: credentials.configurationGeneration,
+    credentialStagedKeyCount: credentials.stagedKeyIds.length,
     credentialLookupActiveKeyId: lookups.activeKeyId,
     credentialLookupReadableKeyCount: lookups.keyIds.length,
+    credentialLookupConfigurationGeneration: lookups.configurationGeneration,
+    credentialLookupStagedKeyCount: lookups.stagedKeyIds.length,
     credentialLookupSeparated: lookups.activeKeyId !== LEGACY_CREDENTIAL_LOOKUP_KEY_ID
   };
 }
@@ -410,41 +457,116 @@ async function stableId(prefix: string, value: string): Promise<string> {
   return `${prefix}-${(await sha256Hex(value)).slice(0, 32)}`;
 }
 
-async function credentialKeyring(): Promise<ResolvedVersionedKeyring> {
+async function credentialKeyring(enforceManifestState = true): Promise<ResolvedVersionedKeyring> {
   const runtime = getRuntimeEnv();
   try {
-    return resolveVersionedKeyring({
+    const keyring = resolveVersionedKeyring({
+      domain: "credential-encryption",
       serialized: runtime.MARKETPLACE_CREDENTIAL_KEYRING,
+      slotManifest: runtime.MARKETPLACE_CREDENTIAL_KEYRING_MANIFEST,
+      slotKeys: credentialKeySlots(runtime),
       legacyKey: runtime.MARKETPLACE_CREDENTIAL_KEY,
       legacyKeyId: LEGACY_CREDENTIAL_KEY_ID,
       developmentKey: process.env.NODE_ENV === "development"
         ? await developmentKey("gongsuanyun-local-development-only")
         : undefined
     });
+    await assertVersionedKeyringVerifiers(keyring);
+    if (enforceManifestState) await assertPersistedKeyringManifestState(keyring);
+    return keyring;
   } catch (error) {
-    if (error instanceof KeyringConfigurationError) invalidRuntimeKeyConfiguration();
+    if (error instanceof KeyringConfigurationError) invalidVersionedKeyringConfiguration(error);
     throw error;
   }
 }
 
-async function credentialLookupKeyring(): Promise<ResolvedVersionedKeyring> {
+async function credentialLookupKeyring(enforceManifestState = true): Promise<ResolvedVersionedKeyring> {
   const runtime = getRuntimeEnv();
   try {
     const legacyEnabled = resolveLegacyKeyAliasEnabled(
       runtime.MARKETPLACE_CREDENTIAL_LOOKUP_LEGACY_ENABLED
     );
-    return resolveVersionedKeyring({
+    const keyring = resolveVersionedKeyring({
+      domain: "credential-lookup",
       serialized: runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEYRING,
+      slotManifest: runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEYRING_MANIFEST,
+      slotKeys: credentialLookupKeySlots(runtime),
       legacyKey: legacyEnabled ? runtime.MARKETPLACE_COMMITMENT_KEY : undefined,
       legacyKeyId: LEGACY_CREDENTIAL_LOOKUP_KEY_ID,
+      legacyAliasEnabled: legacyEnabled,
       developmentKey: legacyEnabled && process.env.NODE_ENV === "development"
         ? await developmentKey("gongsuanyun-commitment-local-development-only")
         : undefined
     });
+    await assertVersionedKeyringVerifiers(keyring);
+    if (enforceManifestState) await assertPersistedKeyringManifestState(keyring);
+    return keyring;
   } catch (error) {
-    if (error instanceof KeyringConfigurationError) invalidRuntimeKeyConfiguration();
+    if (error instanceof KeyringConfigurationError) invalidVersionedKeyringConfiguration(error);
     throw error;
   }
+}
+
+async function assertPersistedKeyringManifestState(
+  keyring: ResolvedVersionedKeyring
+): Promise<void> {
+  const row = await getD1().prepare(
+    `SELECT generation, manifest_hash, minimum_reader_version
+     FROM cryptographic_keyring_states WHERE domain = ?`
+  ).bind(keyring.domain).first<{
+    generation: number;
+    manifest_hash: string;
+    minimum_reader_version: number;
+  }>();
+  if (keyring.configurationGeneration === null || keyring.canonicalManifest === null) {
+    if (row) {
+      throw new ApiError(
+        "CRYPTO_CONFIG_ROLLBACK",
+        "已应用 slot manifest 后不能移除 manifest 并退回兼容源。",
+        503
+      );
+    }
+    return;
+  }
+  const expectedHash = await sha256Hex(keyring.canonicalManifest);
+  if (row && row.generation > keyring.configurationGeneration) {
+    throw new ApiError(
+      "CRYPTO_CONFIG_ROLLBACK",
+      "密钥 manifest generation 低于已应用配置，数据面已失败关闭。",
+      503
+    );
+  }
+  if (
+    !row || row.minimum_reader_version > MARKETPLACE_CRYPTO_READER_VERSION ||
+    row.generation !== keyring.configurationGeneration ||
+    !constantTimeEqual(row.manifest_hash, expectedHash)
+  ) invalidRuntimeKeyConfiguration();
+}
+
+function credentialKeySlots(runtime: Cloudflare.Env): readonly (string | undefined)[] {
+  return [
+    runtime.MARKETPLACE_CREDENTIAL_KEY_SLOT_01,
+    runtime.MARKETPLACE_CREDENTIAL_KEY_SLOT_02,
+    runtime.MARKETPLACE_CREDENTIAL_KEY_SLOT_03,
+    runtime.MARKETPLACE_CREDENTIAL_KEY_SLOT_04,
+    runtime.MARKETPLACE_CREDENTIAL_KEY_SLOT_05,
+    runtime.MARKETPLACE_CREDENTIAL_KEY_SLOT_06,
+    runtime.MARKETPLACE_CREDENTIAL_KEY_SLOT_07,
+    runtime.MARKETPLACE_CREDENTIAL_KEY_SLOT_08
+  ];
+}
+
+function credentialLookupKeySlots(runtime: Cloudflare.Env): readonly (string | undefined)[] {
+  return [
+    runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEY_SLOT_01,
+    runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEY_SLOT_02,
+    runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEY_SLOT_03,
+    runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEY_SLOT_04,
+    runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEY_SLOT_05,
+    runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEY_SLOT_06,
+    runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEY_SLOT_07,
+    runtime.MARKETPLACE_CREDENTIAL_LOOKUP_KEY_SLOT_08
+  ];
 }
 
 function referencedKeyBytes(
@@ -455,7 +577,31 @@ function referencedKeyBytes(
     return keyring.keyBytes(keyId);
   } catch (error) {
     if (error instanceof KeyringConfigurationError) {
-      throw new ApiError("INTERNAL_ERROR", "生产凭据密钥环缺少记录引用的密钥。", 503, true);
+      throw new ApiError(
+        "CRYPTO_REFERENCED_KEY_MISSING",
+        "生产凭据密钥环缺少记录引用的密钥。",
+        503,
+        true
+      );
+    }
+    throw error;
+  }
+}
+
+function referencedVerificationKeyBytes(
+  keyring: ResolvedVersionedKeyring,
+  keyId: string
+): Uint8Array<ArrayBuffer> {
+  try {
+    return keyring.verificationKeyBytes(keyId);
+  } catch (error) {
+    if (error instanceof KeyringConfigurationError) {
+      throw new ApiError(
+        "CRYPTO_REFERENCED_KEY_MISSING",
+        "生产凭据密钥环缺少待验证的密钥。",
+        503,
+        true
+      );
     }
     throw error;
   }
@@ -601,7 +747,18 @@ function invalidKeyVersion(): never {
 }
 
 function invalidRuntimeKeyConfiguration(): never {
-  throw new ApiError("INTERNAL_ERROR", "生产加密密钥配置无效或未相互隔离。", 503);
+  throw new ApiError("CRYPTO_CONFIG_INVALID", "生产加密密钥配置无效或未相互隔离。", 503);
+}
+
+function invalidVersionedKeyringConfiguration(error: KeyringConfigurationError): never {
+  if (error.reason === "capacity") {
+    throw new ApiError(
+      "CRYPTO_KEYRING_CAPACITY_EXHAUSTED",
+      "生产凭据密钥环超过八把密钥的安全容量上限。",
+      503
+    );
+  }
+  invalidRuntimeKeyConfiguration();
 }
 
 function artifactAdditionalData(input: {
@@ -623,6 +780,15 @@ function bytesToBase64(value: Uint8Array): string {
 
 function bytesToHex(value: Uint8Array): string {
   return [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
 }
 
 function base64ToBytes(value: string): Uint8Array<ArrayBuffer> {

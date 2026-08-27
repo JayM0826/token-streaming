@@ -14,7 +14,7 @@ import { useState } from "react";
 import { ArtifactTaskPanel } from "./artifact-task-panel";
 
 type ViewName = "总览" | "购买算力" | "供给管理" | "账本" | "隐私中心" | "审核";
-type ModalName = "supplier" | "authorization" | "offer" | null;
+type ModalName = "supplier" | "authorization" | "offer" | "rotate-credential" | null;
 
 const baseNavigation: Array<{ label: ViewName; glyph: string }> = [
   { label: "总览", glyph: "⌂" },
@@ -28,6 +28,7 @@ export function DashboardClient({ initialSnapshot }: { initialSnapshot: Marketpl
   const [snapshot, setSnapshot] = useState(initialSnapshot);
   const [activeView, setActiveView] = useState<ViewName>("总览");
   const [modal, setModal] = useState<ModalName>(null);
+  const [credentialTarget, setCredentialTarget] = useState<AuthorizationRequestView | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("已连接生产数据 · 所有写入持久保存");
   const [inferenceResult, setInferenceResult] = useState<RunInferenceResponse | null>(null);
@@ -66,6 +67,17 @@ export function DashboardClient({ initialSnapshot }: { initialSnapshot: Marketpl
       "PUT",
       { commandId: crypto.randomUUID(), enabled: !snapshot.supplier.supplyEnabled },
       snapshot.supplier.supplyEnabled ? "新任务供应已暂停" : "供应已开启，符合策略的任务可以进入调度"
+    );
+  }
+
+  async function revokeAuthorization(item: AuthorizationRequestView) {
+    const action = item.status === "pending" ? "撤回" : "撤销";
+    if (!window.confirm(`${action} ${item.providerId} / ${item.modelPattern} 的授权？该操作会立即阻止新任务。`)) return;
+    await mutate(
+      `/api/v1/authorizations/${encodeURIComponent(item.requestId)}/revoke`,
+      "POST",
+      { commandId: crypto.randomUUID(), reasonCode: "supplier-requested" },
+      item.status === "pending" ? "待审核授权已撤回，网关凭据已清除" : "授权已撤销，新任务已阻断，网关凭据与心跳已清除"
     );
   }
 
@@ -196,6 +208,8 @@ export function DashboardClient({ initialSnapshot }: { initialSnapshot: Marketpl
             busy={busy}
             onOpen={setModal}
             onToggleSupply={toggleSupply}
+            onRevoke={(item) => { void revokeAuthorization(item); }}
+            onRotate={(item) => { setCredentialTarget(item); setModal("rotate-credential"); }}
           />
         )}
         {activeView === "账本" && <LedgerWorkspace snapshot={snapshot} />}
@@ -324,6 +338,32 @@ export function DashboardClient({ initialSnapshot }: { initialSnapshot: Marketpl
           </form>
         </Modal>
       )}
+
+      {modal === "rotate-credential" && credentialTarget && (
+        <Modal title="替换网关令牌" kicker="GATEWAY CREDENTIAL ROTATION" onClose={() => setModal(null)}>
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            void mutate(
+              `/api/v1/authorizations/${encodeURIComponent(credentialTarget.requestId)}/credentials/rotate`,
+              "POST",
+              {
+                commandId: crypto.randomUUID(),
+                reasonCode: String(form.get("reasonCode")),
+                gatewayBearerToken: String(form.get("gatewayBearerToken"))
+              },
+              "新网关令牌已验证并替换，旧令牌不可再用于新任务"
+            );
+          }}>
+            <p className="modal-intro">平台会先向同一网关执行签名证明，再以原子写入替换令牌。旧令牌无法读取或重发，响应也不会返回新旧令牌。</p>
+            <label>授权<input value={`${credentialTarget.providerId} · ${credentialTarget.modelPattern}`} readOnly /></label>
+            <label>轮换原因<select name="reasonCode" defaultValue="scheduled"><option value="scheduled">计划轮换</option><option value="credential-compromised">疑似泄露</option><option value="gateway-reconfigured">网关重新配置</option></select></label>
+            <label>新节点共享令牌<input name="gatewayBearerToken" type="password" minLength={32} autoComplete="new-password" required /></label>
+            <div className="policy-note"><span>◇</span><p><b>替换边界</b><small>提交成功后授权 revision 会递增，旧 revision 的 reserve / claim / heartbeat 全部失效</small></p></div>
+            <ModalActions busy={busy} onCancel={() => setModal(null)} label="验证并替换令牌" />
+          </form>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -412,14 +452,21 @@ function PrivacyWorkspace({ snapshot, onNavigate }: {
   </section>;
 }
 
-function SupplierWorkspace({ snapshot, busy, onOpen, onToggleSupply }: { snapshot: MarketplaceDashboardSnapshot; busy: boolean; onOpen: (modal: ModalName) => void; onToggleSupply: () => void }) {
+function SupplierWorkspace({ snapshot, busy, onOpen, onToggleSupply, onRevoke, onRotate }: {
+  snapshot: MarketplaceDashboardSnapshot;
+  busy: boolean;
+  onOpen: (modal: ModalName) => void;
+  onToggleSupply: () => void;
+  onRevoke: (item: AuthorizationRequestView) => void;
+  onRotate: (item: AuthorizationRequestView) => void;
+}) {
   const supplier = snapshot.supplier;
   if (!supplier) return <EmptyPanel title="尚未注册供应商" copy="注册个人或企业主体后即可提交正式容量授权。" action="注册供应商" onAction={() => onOpen("supplier")} />;
   const approved = snapshot.authorizationRequests.some((item) => item.status === "approved");
   return <section className="workspace-section"><div className="workspace-heading"><div><span className="section-kicker">SUPPLIER CONTROL PLANE</span><h1>供给管理</h1><p>{supplier.displayName} · {statusLabel(supplier.status)} · {supplier.countryCode}</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => onOpen("authorization")}>提交授权</button><button className="primary-button" disabled={!approved} onClick={() => onOpen("offer")}>发布报价</button></div></div>
     <article className="panel agent-card"><div><span className="section-kicker">SUPPLIER AGENT</span><h2>先运行供应客户端，再提交节点授权</h2><p>客户端支持 Windows、macOS 和 Linux：本机加密保存 Provider Key，管理端口只绑定 127.0.0.1，并复用 v3 节点内核生成价服一致凭证。</p></div><ol><li><span>1</span>安装并打开 Supplier Agent</li><li><span>2</span>配置精确模型与稳定 HTTPS 地址</li><li><span>3</span>复制网关地址和令牌到授权申请</li></ol><div className="agent-note">技术 Beta 安装包由平台管理员发放；不要提交 Provider API Key、Cookie 或个人订阅登录态。</div></article>
     <section className="panel supplier-status"><div><span className={supplier.supplyEnabled ? "health-pill" : "health-pill muted"}>{supplier.supplyEnabled ? "供给在线" : "供给关闭"}</span><h2>{snapshot.offers.filter((offer) => offer.status === "active").length} 个有效报价</h2><p>开启后调度器只会选择已审核、未过期且容量足够的报价。</p></div><button className="secondary-button" disabled={busy || supplier.status !== "active"} onClick={onToggleSupply}>{supplier.supplyEnabled ? "暂停新任务" : "开启供应"}</button></section>
-    <AuthorizationTable authorizations={snapshot.authorizationRequests} />
+    <AuthorizationTable authorizations={snapshot.authorizationRequests} busy={busy} onRevoke={onRevoke} onRotate={onRotate} />
     <OfferCatalog offers={snapshot.offers} mine />
   </section>;
 }
@@ -438,8 +485,13 @@ function ReviewWorkspace({ reviews, busy, onReview }: { reviews: AuthorizationRe
   return <section className="workspace-section"><div className="workspace-heading"><div><span className="section-kicker">ADMIN REVIEW</span><h1>授权审核</h1><p>批准时会连接白名单节点并完成一次签名证明；Provider、模型、数据等级或容量不匹配都会失败，结果写入审计记录。</p></div><span className="balance-card">待处理 <b>{reviews.length}</b></span></div><div className="review-list">{reviews.map((item) => <article className="panel review-card" key={item.requestId}><div className="review-main"><span className="scope-pill">{item.sourceType}</span><h3>{item.supplierDisplayName}</h3><p>{item.providerId} · {item.modelPattern} · {item.gatewayHost}</p><dl><div><dt>证据引用</dt><dd>{item.evidenceRef}</dd></div><div><dt>数据范围</dt><dd>{item.dataClasses.join(" / ")}</dd></div><div><dt>容量</dt><dd>{item.limits.tokensPerMinute.toLocaleString()} TPM · {item.limits.concurrency} 并发</dd></div><div><dt>有效至</dt><dd>{formatDate(item.validUntil)}</dd></div></dl></div><div className="review-actions"><button className="secondary-button danger" disabled={busy} onClick={() => onReview(item.requestId, "reject")}>拒绝</button><button className="primary-button" disabled={busy} onClick={() => onReview(item.requestId, "approve")}>验证节点并批准</button></div></article>)}{reviews.length === 0 && <EmptyPanel title="没有待审核授权" copy="新的供应商容量授权会显示在这里。" />}</div></section>;
 }
 
-function AuthorizationTable({ authorizations }: { authorizations: AuthorizationRequestView[] }) {
-  return <article className="panel table-panel"><div className="panel-heading"><div><span className="section-kicker">AUTHORIZATIONS</span><h3>容量授权</h3></div></div><div className="table-scroll"><table><thead><tr><th>Provider / 模型</th><th>来源</th><th>网关</th><th>数据</th><th>状态</th></tr></thead><tbody>{authorizations.map((item) => <tr key={item.requestId}><td><b>{item.providerId}</b><small className="cell-sub">{item.modelPattern}</small></td><td>{item.sourceType}</td><td>{item.gatewayHost}</td><td>{item.dataClasses.join(" / ")}</td><td><span className={`status-pill ${item.status === "approved" ? "live" : item.status === "rejected" ? "danger" : "review"}`}>{reviewLabel(item.status)}</span></td></tr>)}{authorizations.length === 0 && <tr><td colSpan={5}><div className="empty-row">尚未提交授权</div></td></tr>}</tbody></table></div></article>;
+function AuthorizationTable({ authorizations, busy, onRevoke, onRotate }: {
+  authorizations: AuthorizationRequestView[];
+  busy: boolean;
+  onRevoke: (item: AuthorizationRequestView) => void;
+  onRotate: (item: AuthorizationRequestView) => void;
+}) {
+  return <article className="panel table-panel"><div className="panel-heading"><div><span className="section-kicker">AUTHORIZATIONS</span><h3>容量授权</h3></div></div><div className="table-scroll"><table><thead><tr><th>Provider / 模型</th><th>来源</th><th>网关</th><th>数据</th><th>状态</th><th>操作</th></tr></thead><tbody>{authorizations.map((item) => <tr key={item.requestId}><td><b>{item.providerId}</b><small className="cell-sub">{item.modelPattern}</small></td><td>{item.sourceType}</td><td>{item.gatewayHost}<small className="cell-sub">revision {item.authorizationRevision}{item.credentialRotatedAt ? ` · ${formatDate(item.credentialRotatedAt)}` : ""}</small></td><td>{item.dataClasses.join(" / ")}</td><td><span className={`status-pill ${authorizationStatusTone(item.status)}`}>{reviewLabel(item.status)}</span></td><td>{item.status === "approved" && <button className="table-action" disabled={busy} onClick={() => onRotate(item)}>替换令牌</button>}{(item.status === "pending" || item.status === "approved") && <button className="table-action danger" disabled={busy} onClick={() => onRevoke(item)}>{item.status === "pending" ? "撤回申请" : "撤销授权"}</button>}</td></tr>)}{authorizations.length === 0 && <tr><td colSpan={6}><div className="empty-row">尚未提交授权</div></td></tr>}</tbody></table></div></article>;
 }
 
 function OfferCatalog({ offers, mine = false }: { offers: CapacityOfferView[]; mine?: boolean }) {
@@ -463,6 +515,7 @@ function defaultLocalDate(days: number) { const date = new Date(Date.now() + day
 function toUtc(value: string) { return new Date(value).toISOString(); }
 function roleLabel(kind: "individual" | "organization") { return kind === "individual" ? "个人供给方" : "企业供给方"; }
 function statusLabel(status: string) { return ({ "pending-verification": "等待审核", active: "已激活", suspended: "已暂停", rejected: "已拒绝" } as Record<string, string>)[status] ?? status; }
-function reviewLabel(status: string) { return ({ pending: "审核中", approved: "已通过", rejected: "已拒绝" } as Record<string, string>)[status] ?? status; }
+function reviewLabel(status: string) { return ({ pending: "审核中", approved: "已通过", rejected: "已拒绝", withdrawn: "已撤回", revoked: "已撤销", expired: "已过期" } as Record<string, string>)[status] ?? status; }
+function authorizationStatusTone(status: string) { return status === "approved" ? "live" : ["rejected", "withdrawn", "revoked"].includes(status) ? "danger" : "review"; }
 function offerStatusLabel(status: string) { return ({ active: "供给中", paused: "已暂停", expired: "已过期" } as Record<string, string>)[status] ?? status; }
 function ledgerLabel(type: string) { return ({ "promotional-credit": "试运营赠额", "inference-debit": "推理消费", "supplier-credit": "供应收益", "platform-fee": "平台服务费", adjustment: "补偿调整" } as Record<string, string>)[type] ?? type; }

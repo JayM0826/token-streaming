@@ -22,3 +22,4 @@ review_required:
   - supplier gateway authentication, persistent replay journal, capacity, or upstream-host policy changes
   - artifact encryption, retention, lease, checkpoint, capability heartbeat, evidence, or reservation changes
   - privacy visibility, acknowledgement, tenant isolation, key separation, digest commitment, purge, management bootstrap/session, or local-vault changes
+  - cryptographic key custody, canary registration, runtime retirement, secret deletion, recovery-copy destruction, backup retention, or minimum reader-version changes

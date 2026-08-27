@@ -20,7 +20,11 @@ artifact_data_plane:
   - npx pnpm@9.15.0 --filter @token-streaming/supplier-agent test
   - npx pnpm@9.15.0 --dir apps/web build
 privacy_security:
-  - node --test "apps/web/test/**/*.test.mjs"
+  - node --test apps/web/test/cryptographic-key-lifecycle-invariants.test.mjs apps/web/test/keyring.test.mjs apps/web/test/privacy-boundaries.test.mjs apps/web/test/schema-bootstrap.test.mjs apps/web/test/migration-integration.test.mjs
   - npx pnpm@9.15.0 --filter @token-streaming/marketplace-domain test
   - npx pnpm@9.15.0 --filter @token-streaming/supplier-agent test
+  - npx pnpm@9.15.0 --dir apps/web typecheck
+authorization_lifecycle:
+  - node --test apps/web/test/authorization-lifecycle-invariants.test.mjs apps/web/test/financial-invariants.test.mjs apps/web/test/agent-auth-invariants.test.mjs apps/web/test/schema-bootstrap.test.mjs apps/web/test/migration-integration.test.mjs
+  - npx pnpm@9.15.0 --filter @token-streaming/marketplace-domain test
   - npx pnpm@9.15.0 --dir apps/web typecheck

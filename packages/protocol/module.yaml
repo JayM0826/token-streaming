@@ -24,6 +24,8 @@ rules:
   - Never add passwords, cookies, API keys, reusable tokens, or raw identity documents to marketplace contracts.
   - Keep browser-facing marketplace views free of tenant identifiers and encrypted credential fields.
   - Keep reviewer-conflict refusal machine-readable; same-tenant authorization review uses REVIEWER_CONFLICT rather than display-string parsing.
+  - Model authorization withdrawal, revocation, derived expiry, revision, and write-only Gateway token replacement explicitly; never put old or replacement token material in a response or event.
+  - Keep authorization lifecycle and credential-generation conflicts machine-readable through AUTHORIZATION_STATE_CONFLICT and GATEWAY_CREDENTIAL_CONFLICT.
   - Keep supplier-gateway contracts provider-neutral and version breaking wire changes explicitly.
   - Keep signature canonicalization deterministic and free of runtime dependencies.
   - Bind every billable response to canonical execution evidence covering Provider, requested and served model, request ID, input/output digests, usage, and completion time.

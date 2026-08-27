@@ -74,26 +74,21 @@ export async function claimArtifactTask(
   const db = getD1();
   const now = new Date().toISOString();
   const heartbeatExpiresAt = new Date(Date.now() + 2 * 60_000).toISOString();
-  await db.prepare(
-    `INSERT INTO supplier_artifact_workers (
-      supplier_tenant_id, worker_id, provider_id, authorization_request_ids_json,
-      allowed_models_json, supported_media_types_json, max_artifact_bytes, last_seen_at, expires_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (supplier_tenant_id, worker_id) DO UPDATE SET
-      provider_id = excluded.provider_id,
-      authorization_request_ids_json = excluded.authorization_request_ids_json,
-      allowed_models_json = excluded.allowed_models_json,
-      supported_media_types_json = excluded.supported_media_types_json,
-      max_artifact_bytes = excluded.max_artifact_bytes,
-      last_seen_at = excluded.last_seen_at,
-      expires_at = excluded.expires_at`
-  ).bind(
+  const heartbeat = await db.prepare(agentHeartbeatUpsertSql(authorized.length)).bind(
     identity.supplierTenantId, workerId, providerId,
     JSON.stringify(authorized.map((item) => item.requestId).sort()),
     JSON.stringify([...allowedModels].sort()),
     JSON.stringify([...supportedMediaTypes].sort()),
-    maxArtifactBytes, now, heartbeatExpiresAt
+    maxArtifactBytes, now, heartbeatExpiresAt,
+    identity.supplierTenantId,
+    identity.supplierId,
+    now,
+    ...authorized.flatMap((item) => [item.requestId, item.authorizationRevision]),
+    authorized.length
   ).run();
+  if ((heartbeat.meta.changes ?? 0) !== 1) {
+    throw new ApiError("CONFLICT", "Agent 授权在能力登记期间发生变化。", 409, true);
+  }
   const policy = getMarketplaceRuntimePolicy();
   const maximumAttempts = policy.artifactMaximumAttempts;
   await db.batch([
@@ -101,7 +96,9 @@ export async function claimArtifactTask(
       `UPDATE artifact_tasks SET status = 'cancelled', lease_digest = NULL, lease_expires_at = NULL,
        execution_deadline_at = NULL,
        instruction_ciphertext = '', instruction_iv = '',
-       error_code = 'USER_CANCELLED', completed_at = ?, updated_at = ?
+       error_code = CASE WHEN error_code = 'AUTHORIZATION_REVOKED_PENDING'
+         THEN 'AUTHORIZATION_REVOKED' ELSE 'USER_CANCELLED' END,
+       completed_at = ?, updated_at = ?
        WHERE supplier_tenant_id = ? AND cancellation_requested_at IS NOT NULL
          AND status IN ('claimed', 'running')
          AND (lease_expires_at < ? OR execution_deadline_at IS NULL OR execution_deadline_at <= ?)`
@@ -160,6 +157,9 @@ export async function claimArtifactTask(
       retry_after_ms: 5_000
     };
   }
+  const candidateAuthorization = authorized.find((item) =>
+    item.requestId === candidate.authorization_request_id
+  )!;
 
   const resumeFromSegment = candidate.worker_id === workerId ? candidate.completed_segments : 0;
   const leaseToken = randomToken();
@@ -180,27 +180,41 @@ export async function claimArtifactTask(
       output_tokens = CASE WHEN ? = 0 THEN NULL ELSE output_tokens END,
       total_tokens = CASE WHEN ? = 0 THEN NULL ELSE total_tokens END,
       started_at = COALESCE(started_at, ?), updated_at = ?, error_code = NULL
-     WHERE task_id = ? AND supplier_tenant_id = ? AND status = 'queued'
+     WHERE task_id = ? AND supplier_tenant_id = ?
+       AND authorization_request_id = ? AND status = 'queued'
        AND cancellation_requested_at IS NULL
        AND EXISTS (
          SELECT 1 FROM capacity_offers o
          JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
          JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id
-         WHERE o.offer_id = artifact_tasks.offer_id AND o.status = 'active'
+           AND ar.authorization_revision = ?
+         WHERE o.offer_id = artifact_tasks.offer_id
+           AND o.authorization_request_id = artifact_tasks.authorization_request_id
+           AND o.tenant_id = artifact_tasks.supplier_tenant_id AND o.status = 'active'
            AND o.valid_from <= ? AND o.valid_until > ? AND ar.status = 'approved'
-           AND ar.valid_until > ? AND s.status = 'active' AND s.supply_enabled = 1
+           AND ar.valid_until > ? AND ar.tenant_id = o.tenant_id
+           AND ar.supplier_id = o.supplier_id AND ar.provider_id = o.provider_id
+           AND s.status = 'active' AND s.supply_enabled = 1
            AND (
              (SELECT COUNT(*) FROM inference_jobs
                WHERE offer_id = artifact_tasks.offer_id AND status IN ('reserved', 'running'))
              + (SELECT COUNT(*) FROM artifact_tasks active_tasks
-               WHERE active_tasks.offer_id = artifact_tasks.offer_id
+             WHERE active_tasks.offer_id = artifact_tasks.offer_id
                  AND active_tasks.status IN ('claimed', 'running'))
            ) < o.concurrency
+       ) AND EXISTS (
+         SELECT 1 FROM supplier_artifact_workers w
+         WHERE w.supplier_tenant_id = ? AND w.worker_id = ? AND w.provider_id = ?
+           AND w.expires_at > ?
+           AND w.authorization_request_ids_json LIKE ('%' || '"' || artifact_tasks.authorization_request_id || '"' || '%')
        )`
   ).bind(
     workerId, leaseDigest, leaseExpiresAt, executionDeadlineAt, resumeFromSegment,
     resumeFromSegment, resumeFromSegment, resumeFromSegment, resumeFromSegment, resumeFromSegment,
-    now, now, candidate.task_id, identity.supplierTenantId, now, now, now
+    now, now, candidate.task_id, identity.supplierTenantId,
+    candidate.authorization_request_id, candidateAuthorization.authorizationRevision,
+    now, now, now,
+    identity.supplierTenantId, workerId, providerId, now
   ).run();
   if ((claimed.meta.changes ?? 0) !== 1) {
     return {
@@ -537,15 +551,16 @@ export async function completeArtifactTask(
   }
   await db.batch(statements);
   const recorded = await db.prepare(
-    `SELECT t.status, t.cancellation_requested_at, e.evidence_digest FROM artifact_tasks t
+    `SELECT t.status, t.cancellation_requested_at, t.error_code, e.evidence_digest FROM artifact_tasks t
      LEFT JOIN artifact_task_evidence e ON e.task_id = t.task_id WHERE t.task_id = ?`
   ).bind(task.task_id).first<{
     status: string;
     cancellation_requested_at: string | null;
+    error_code: string | null;
     evidence_digest: string | null;
   }>();
   if (recorded?.cancellation_requested_at || recorded?.status === "cancelled") {
-    throw new ApiError("ARTIFACT_TASK_CANCELLED", "文件任务已由购买方取消；结果未结算。", 409);
+    throw new ApiError("ARTIFACT_TASK_CANCELLED", artifactCancellationMessage(recorded.error_code, "结果未结算。"), 409);
   }
   if (recorded?.status !== "completed" || recorded.evidence_digest !== evidenceDigest) {
     throw new ApiError("INSUFFICIENT_BALANCE", "预留已失效或可用余额不足，平台未写入任何结算记录。", 409);
@@ -619,7 +634,7 @@ async function requireLeasedTask(
   ).first<WorkerTaskRow>();
   if (!task) {
     const terminal = await getD1().prepare(
-      `SELECT status, cancellation_requested_at, privacy_mode, artifact_id, lease_digest
+      `SELECT status, cancellation_requested_at, privacy_mode, artifact_id, lease_digest, error_code
        FROM artifact_tasks WHERE task_id = ? AND supplier_tenant_id = ?`
     ).bind(taskId, identity.supplierTenantId).first<{
       status: string;
@@ -627,6 +642,7 @@ async function requireLeasedTask(
       privacy_mode: "standard" | "strict";
       artifact_id: string;
       lease_digest: string | null;
+      error_code: string | null;
     }>();
     if (terminal?.cancellation_requested_at && terminal.lease_digest === leaseDigest) {
       const now = new Date().toISOString();
@@ -634,7 +650,9 @@ async function requireLeasedTask(
         getD1().prepare(
           `UPDATE artifact_tasks SET status = 'cancelled', lease_digest = NULL, lease_expires_at = NULL,
              execution_deadline_at = NULL,
-             error_code = 'USER_CANCELLED', completed_at = COALESCE(completed_at, ?), updated_at = ?
+             error_code = CASE WHEN error_code = 'AUTHORIZATION_REVOKED_PENDING'
+               THEN 'AUTHORIZATION_REVOKED' ELSE 'USER_CANCELLED' END,
+             completed_at = COALESCE(completed_at, ?), updated_at = ?
            WHERE task_id = ? AND supplier_tenant_id = ? AND lease_digest = ?
              AND cancellation_requested_at IS NOT NULL AND status IN ('claimed', 'running')`
         ).bind(now, now, taskId, identity.supplierTenantId, leaseDigest),
@@ -645,10 +663,10 @@ async function requireLeasedTask(
         ).bind(now, now, terminal.artifact_id, taskId)
       ]);
       if (terminal.privacy_mode === "strict") await cleanupExpiredArtifactData(now);
-      throw new ApiError("ARTIFACT_TASK_CANCELLED", "文件任务已由购买方取消；平台不会接收或结算后续结果。", 409);
+      throw new ApiError("ARTIFACT_TASK_CANCELLED", artifactCancellationMessage(terminal.error_code, "平台不会接收或结算后续结果。"), 409);
     }
     if (terminal?.status === "cancelled") {
-      throw new ApiError("ARTIFACT_TASK_CANCELLED", "文件任务已由购买方取消；平台不会接收或结算后续结果。", 409);
+      throw new ApiError("ARTIFACT_TASK_CANCELLED", artifactCancellationMessage(terminal.error_code, "平台不会接收或结算后续结果。"), 409);
     }
     throw invalidLease();
   }
@@ -663,6 +681,39 @@ function assertWorkerEnvelope(
 ): void {
   if (protocolVersion !== SUPPLIER_ARTIFACT_WORKER_PROTOCOL_VERSION) invalid("Agent 文件任务协议版本不受支持。");
   if (requestId !== identity.signedJobId) throw new ApiError("AUTHENTICATION_REQUIRED", "Agent 请求标识与签名不一致。", 401);
+}
+
+function artifactCancellationMessage(errorCode: string | null, consequence: string): string {
+  return errorCode?.startsWith("AUTHORIZATION_REVOKED")
+    ? `供应授权已撤销；${consequence}`
+    : `文件任务已由购买方取消；${consequence}`;
+}
+
+function agentHeartbeatUpsertSql(authorizationCount: number): string {
+  if (!Number.isInteger(authorizationCount) || authorizationCount < 1 || authorizationCount > 100) {
+    throw new RangeError("Agent heartbeat authorization count is out of bounds");
+  }
+  const revisions = Array.from(
+    { length: authorizationCount },
+    () => "(request_id = ? AND authorization_revision = ?)"
+  ).join(" OR ");
+  return `INSERT INTO supplier_artifact_workers (
+      supplier_tenant_id, worker_id, provider_id, authorization_request_ids_json,
+      allowed_models_json, supported_media_types_json, max_artifact_bytes, last_seen_at, expires_at
+    ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE (
+        SELECT COUNT(*) FROM authorization_requests
+        WHERE tenant_id = ? AND supplier_id = ? AND status = 'approved' AND valid_until > ?
+          AND (${revisions})
+      ) = ?
+    ON CONFLICT (supplier_tenant_id, worker_id) DO UPDATE SET
+      provider_id = excluded.provider_id,
+      authorization_request_ids_json = excluded.authorization_request_ids_json,
+      allowed_models_json = excluded.allowed_models_json,
+      supported_media_types_json = excluded.supported_media_types_json,
+      max_artifact_bytes = excluded.max_artifact_bytes,
+      last_seen_at = excluded.last_seen_at,
+      expires_at = excluded.expires_at`;
 }
 
 function validateUsage(value: unknown, maximumTotalTokens: number): SupplierGatewayUsage {

@@ -19,6 +19,10 @@ rules:
   - Sign every supplier-node call with the encrypted gateway token, timestamp, nonce, job ID, and exact request-body digest.
   - Require a signed live supplier-node attestation before approving authorization; reject Provider, model, data-class, or capacity mismatches.
   - Reject review of a supplier authorization by an administrator from the same tenant at both the service and atomic review-claim boundaries.
+  - Bind authorization withdraw, revoke, and Gateway-token replacement commands to the supplier tenant, normalized payload, exact authorization revision, and one global lifecycle target; only a command-bound winner or exact replay may report success.
+  - On revoke, atomically scrub credential material, delete Agent heartbeats, stop new reserve/claim, fail unstarted work, preserve running inference settlement, and keep leased artifact reservations until two-phase cancellation is terminal.
+  - On Gateway-token replacement, live-attest the new token, never return either token, advance authorization revision, atomically fail and release only old-revision inference reservations that have not entered running, enforce cross-principal token isolation and the 100-authorization cap at the write boundary, and let the new generation claim still-valid queued work.
+  - Publish capacity offers only through one INSERT...SELECT authorization CAS that rechecks the exact request/revision, approved status, validity, credential presence, supplier version, and active supplier state.
   - Verify canonical per-job execution evidence before settlement and atomically persist the evidence with balanced ledger postings.
   - Reserve buyer funds atomically across synchronous and artifact workloads; settle only from a live reservation and never above its ceiling.
   - Keep the consumer PWA service worker away from authenticated pages, sign-in routes, and API responses.
@@ -43,6 +47,10 @@ rules:
   - Keep customer job, artifact, filename, instruction, and replayable output views buyer-only; suppliers receive only their leased assignment and aggregate business metrics.
   - Require explicit supplier/upstream plaintext-processing acknowledgement and default the UI to strict retention without claiming end-to-end execution secrecy.
   - Separate credential, credential-lookup, replayable-content, artifact, and digest-commitment domains; keep AES/HMAC format versions distinct from persisted key ids and bind ciphertext and commitments to purpose, tenant, and resource identity.
+  - Deliver new credential and lookup keys through independent write-only slots plus a strict staged/readable manifest; keep compatibility composite secrets untouched until references drain, require a tested recovery copy for every readable key, and never describe a verifier or canary as a key backup.
+  - Separate key runtime retirement, deletion of a Sites runtime copy, and destruction of the final KMS/HSM recovery copy; live D1 zero-reference checks authorize only the first action because retained backups may still contain old formats and key ids.
+  - Require manifest generation/hash to match the applied D1 state before customer, Agent, or maintenance crypto paths run; make lifecycle command IDs globally unique across domains/actions, apply forward generations and register staged canaries only through dedicated maintenance-authenticated lifecycle routes, allow configured-readable-key baselining only by atomically consuming migration-proven fresh-database eligibility while complete durable history remains empty, and keep cryptographic preflight D1-read-only even before lifecycle tables exist.
+  - After any format-3 credential or lookup row exists in live D1 or a retained backup, forbid deployment rollback to a reader that supports only formats 1/2; recover by rolling forward with a v1/v2/v3-compatible reader.
   - Purge active content and raw manifests without deleting or rewriting append-only ledger, usage, audit, or evidence history.
   - Apply durable tenant/credential rate limits, same-origin mutation checks, and no-store defensive response headers.
   - Run retention independently through a pre-auth rate-limited, constant-time bearer maintenance endpoint; before cleanup, validate every configured key, persistent key canary, and live D1 key-id reference, then CAS-rewrap at most four stale gateway credentials without reviving scrubbed material.
@@ -50,4 +58,4 @@ rules:
   - Report object-deletion backlog/overdue/oldest/breached state plus unclaimedExpiredArtifacts and pendingArtifactTombstones with independent 24-hour breach counts; threshold all three backlogs, fail on any breach, scrub expired credentials, and never treat scheduler cadence as a hard deletion SLA.
   - Keep local .env, .dev.vars, and .wrangler state ignored while retaining example templates; production secrets belong in runtime configuration, not repository artifacts.
   - Persist event schema versions and command guards; concurrency losers must not emit duplicate domain events, audits, or side effects.
-  - Exercise the 0000-0011 schema chain and all 21 tables against a real temporary D1 database with legacy rows, and keep production bootstrap additive, re-entrant, and safe under Worker-isolate races; source-pattern assertions alone are not migration evidence.
+  - Exercise the 0000-0015 schema chain and all 24 tables against a real temporary D1 database with legacy rows, and keep production bootstrap additive, re-entrant, and safe under Worker-isolate races; source-pattern assertions alone are not migration evidence.

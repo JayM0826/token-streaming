@@ -18,6 +18,7 @@ export interface AgentAuthorizationIdentity {
   signedJobId: string;
   authorizations: Array<{
     requestId: string;
+    authorizationRevision: number;
     providerId: string;
     modelPattern: string;
   }>;
@@ -32,6 +33,7 @@ interface AgentAuthorizationRow {
   gateway_token_digest: string;
   gateway_token_digest_version: number;
   gateway_token_lookup_key_id: string;
+  authorization_revision: number;
 }
 
 export async function readSignedAgentJson<T>(
@@ -82,6 +84,7 @@ export async function authenticateAgentRequest(
   const resultPromise = db.prepare(
     `SELECT ar.request_id, ar.tenant_id, ar.supplier_id, ar.provider_id, ar.model_pattern,
        ar.gateway_token_digest, ar.gateway_token_digest_version, ar.gateway_token_lookup_key_id
+       , ar.authorization_revision
      FROM authorization_requests ar
      JOIN suppliers s ON s.supplier_id = ar.supplier_id AND s.tenant_id = ar.tenant_id
      WHERE ((ar.gateway_token_digest_version = 1 AND ar.gateway_token_digest = ?)
@@ -182,6 +185,7 @@ export async function authenticateAgentRequest(
     legacyCredentialDigest,
     now
   );
+  await assertAuthenticatedRowsCurrent(db, result.results, credentialLookup, now);
   return {
     credentialDigest,
     gatewayToken,
@@ -190,10 +194,36 @@ export async function authenticateAgentRequest(
     signedJobId: jobId,
     authorizations: result.results.map((row) => ({
       requestId: row.request_id,
+      authorizationRevision: row.authorization_revision,
       providerId: row.provider_id,
       modelPattern: row.model_pattern
     }))
   };
+}
+
+async function assertAuthenticatedRowsCurrent(
+  db: D1Database,
+  rows: readonly AgentAuthorizationRow[],
+  active: { digest: string; version: 2 | 3; keyId: string },
+  now: string
+): Promise<void> {
+  const revisions = rows.map(() => "(ar.request_id = ? AND ar.authorization_revision = ?)").join(" OR ");
+  const current = await db.prepare(
+    `SELECT COUNT(*) AS authorization_count FROM authorization_requests ar
+     JOIN suppliers s ON s.supplier_id = ar.supplier_id AND s.tenant_id = ar.tenant_id
+     WHERE (${revisions}) AND ar.status = 'approved' AND ar.valid_until > ?
+       AND ar.gateway_token_digest_version = ? AND ar.gateway_token_lookup_key_id = ?
+       AND ar.gateway_token_digest = ? AND s.status = 'active' AND s.supply_enabled = 1`
+  ).bind(
+    ...rows.flatMap((row) => [row.request_id, row.authorization_revision]),
+    now,
+    active.version,
+    active.keyId,
+    active.digest
+  ).first<{ authorization_count: number }>();
+  if ((current?.authorization_count ?? 0) !== rows.length) {
+    throw new ApiError("CONFLICT", "Agent 授权在签名验证期间发生变化。", 409, true);
+  }
 }
 
 async function migrateEveryReadableLookupNamespace(

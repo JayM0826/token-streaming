@@ -58,6 +58,21 @@ test("agent authentication preserves legacy token syntax but migrates every veri
   assert.equal((source.match(/"Agent 身份验证失败。"/g) ?? []).length, 1);
 });
 
+test("artifact claim rechecks the current authorization generation and heartbeat at the final write", async () => {
+  const agentAuth = await readFile(path.join(webRoot, "server", "agent-auth.ts"), "utf8");
+  const worker = await readFile(path.join(webRoot, "server", "artifact-worker-service.ts"), "utf8");
+  const artifact = await readFile(path.join(webRoot, "server", "artifact-service.ts"), "utf8");
+
+  assert.match(agentAuth, /authorizationRevision: row\.authorization_revision/);
+  assert.match(agentAuth, /ar\.request_id = \? AND ar\.authorization_revision = \?/);
+  assert.match(worker, /candidateAuthorization\.authorizationRevision/);
+  assert.match(worker, /ar\.authorization_revision = \?/);
+  assert.match(worker, /SELECT 1 FROM supplier_artifact_workers w/);
+  assert.match(worker, /w\.expires_at > \?/);
+  assert.match(worker, /error_code = CASE WHEN error_code = 'AUTHORIZATION_REVOKED_PENDING'[\s\S]*?'AUTHORIZATION_REVOKED'/);
+  assert.match(artifact, /error_code = CASE WHEN error_code = 'AUTHORIZATION_REVOKED_PENDING'[\s\S]*?'AUTHORIZATION_REVOKED'/);
+});
+
 test("verified lookup migration drains rows beyond the bounded Agent response", () => {
   const db = lookupDatabase();
   const insert = db.prepare(

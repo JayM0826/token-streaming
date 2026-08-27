@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { check, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
   userId: text("user_id").primaryKey(),
@@ -58,11 +58,15 @@ export const authorizationRequests = sqliteTable(
     gatewayTokenDigestVersion: integer("gateway_token_digest_version").notNull().default(1),
     gatewayTokenLookupKeyId: text("gateway_token_lookup_key_id").notNull().default("legacy-commitment-v2"),
     encryptionKeyVersion: integer("encryption_key_version").notNull().default(1),
+    authorizationRevision: integer("authorization_revision").notNull().default(1),
     status: text("status").notNull(),
     reviewNote: text("review_note"),
     reviewedBy: text("reviewed_by"),
     reviewCommandId: text("review_command_id"),
     reviewedAt: text("reviewed_at"),
+    credentialRotatedAt: text("credential_rotated_at"),
+    revokedAt: text("revoked_at"),
+    revocationReasonCode: text("revocation_reason_code"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull()
   },
@@ -150,6 +154,8 @@ export const inferenceJobs = sqliteTable(
     buyerTenantId: text("buyer_tenant_id").notNull(),
     supplierTenantId: text("supplier_tenant_id").notNull(),
     offerId: text("offer_id").notNull(),
+    authorizationRequestId: text("authorization_request_id"),
+    authorizationRevision: integer("authorization_revision"),
     idempotencyKey: text("idempotency_key").notNull(),
     model: text("model").notNull(),
     dataClass: text("data_class").notNull(),
@@ -178,7 +184,8 @@ export const inferenceJobs = sqliteTable(
     uniqueIndex("idx_inference_jobs_idempotency").on(table.buyerTenantId, table.idempotencyKey),
     index("idx_inference_jobs_buyer_created").on(table.buyerTenantId, table.createdAt),
     index("idx_inference_jobs_supplier_created").on(table.supplierTenantId, table.createdAt),
-    index("idx_inference_jobs_offer_status").on(table.offerId, table.status)
+    index("idx_inference_jobs_offer_status").on(table.offerId, table.status),
+    index("idx_inference_jobs_authorization_status").on(table.authorizationRequestId, table.status)
   ]
 );
 
@@ -315,6 +322,64 @@ export const cryptographicKeyCanaries = sqliteTable(
   (table) => [uniqueIndex("idx_cryptographic_key_canaries_domain_key").on(table.domain, table.keyId)]
 );
 
+export const cryptographicKeyBootstrapEligibility = sqliteTable(
+  "cryptographic_key_bootstrap_eligibility",
+  {
+    domain: text("domain").primaryKey(),
+    provenance: text("provenance").notNull(),
+    eligibleAt: text("eligible_at").notNull(),
+    consumedAt: text("consumed_at"),
+    consumedCommandId: text("consumed_command_id")
+  },
+  (table) => [
+    check(
+      "cryptographic_key_bootstrap_eligibility_domain_check",
+      sql`${table.domain} IN ('credential-encryption', 'credential-lookup')`
+    ),
+    check(
+      "cryptographic_key_bootstrap_eligibility_provenance_check",
+      sql`${table.provenance} = 'migration-empty-history-v1'`
+    ),
+    check(
+      "cryptographic_key_bootstrap_eligibility_consumption_check",
+      sql`(${table.consumedAt} IS NULL AND ${table.consumedCommandId} IS NULL) OR
+          (${table.consumedAt} IS NOT NULL AND ${table.consumedCommandId} IS NOT NULL)`
+    )
+  ]
+);
+
+export const cryptographicKeyringStates = sqliteTable("cryptographic_keyring_states", {
+  domain: text("domain").primaryKey(),
+  generation: integer("generation").notNull(),
+  manifestHash: text("manifest_hash").notNull(),
+  activeKeyId: text("active_key_id").notNull(),
+  minimumReaderVersion: integer("minimum_reader_version").notNull().default(3),
+  appliedAt: text("applied_at").notNull(),
+  commandId: text("command_id").notNull()
+});
+
+export const cryptographicKeyLifecycleEvents = sqliteTable(
+  "cryptographic_key_lifecycle_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    domain: text("domain").notNull(),
+    keyId: text("key_id").notNull(),
+    eventType: text("event_type").notNull(),
+    generation: integer("generation").notNull(),
+    manifestHash: text("manifest_hash").notNull(),
+    backupReference: text("backup_reference"),
+    commandId: text("command_id").notNull(),
+    occurredAt: text("occurred_at").notNull()
+  },
+  (table) => [
+    uniqueIndex("idx_cryptographic_key_lifecycle_command_global").on(table.commandId),
+    uniqueIndex("idx_cryptographic_key_registered_once")
+      .on(table.domain, table.keyId, table.eventType)
+      .where(sql`${table.eventType} = 'KEY_REGISTERED'`),
+    index("idx_cryptographic_key_lifecycle_time").on(table.domain, table.occurredAt)
+  ]
+);
+
 export const artifacts = sqliteTable(
   "artifacts",
   {
@@ -405,6 +470,7 @@ export const artifactTasks = sqliteTable(
     supplierTenantId: text("supplier_tenant_id").notNull(),
     offerId: text("offer_id").notNull(),
     authorizationRequestId: text("authorization_request_id").notNull(),
+    authorizationRevision: integer("authorization_revision").notNull().default(1),
     artifactId: text("artifact_id").notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
     model: text("model").notNull(),
@@ -446,7 +512,8 @@ export const artifactTasks = sqliteTable(
     uniqueIndex("idx_artifact_tasks_idempotency").on(table.buyerTenantId, table.idempotencyKey),
     index("idx_artifact_tasks_buyer_created").on(table.buyerTenantId, table.createdAt),
     index("idx_artifact_tasks_supplier_status").on(table.supplierTenantId, table.status, table.createdAt),
-    index("idx_artifact_tasks_offer_status").on(table.offerId, table.status)
+    index("idx_artifact_tasks_offer_status").on(table.offerId, table.status),
+    index("idx_artifact_tasks_authorization_status").on(table.authorizationRequestId, table.status)
   ]
 );
 

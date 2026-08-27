@@ -1,0 +1,2 @@
+CREATE INDEX `idx_artifact_tasks_authorization_status` ON `artifact_tasks` (`authorization_request_id`,`status`);--> statement-breakpoint
+CREATE INDEX `idx_inference_jobs_authorization_status` ON `inference_jobs` (`authorization_request_id`,`status`);

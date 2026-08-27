@@ -10,6 +10,8 @@ Personal `subscription-plan` capacity is a supported source type. It still requi
 
 Activation is not a permanent bypass. New offers re-check current KYC/KYB and provider authorization state. P2/P3 offers fail closed until a dedicated compliance policy is represented in the protocol.
 
+`revokeProviderAuthorization` appends `supplier.provider-authorization-revoked` at the next aggregate version. Hosts must project it prospectively: stop new reservations and claims, preserve append-only history, and let only already-running work reach its guarded terminal settlement. Gateway-token storage and replacement stay outside the domain, but a host replacement must preserve the same authorization identity while advancing its storage revision.
+
 Settlement helpers calculate integer-micro buyer charges, platform fees, and supplier credits without floating-point money. The returned postings are balanced by construction and are consumed by deployment-specific append-only ledger storage.
 
 Signed supplier-node attestation verification compares the approval claim with the live node's protocol, challenge, Provider identity, exact model inventory, P0/P1 scope, and available capacity. A mismatch fails closed before the authorization can activate.

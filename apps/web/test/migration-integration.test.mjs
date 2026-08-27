@@ -42,13 +42,16 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
       .sort();
     assert.deepEqual(
       migrations.map((name) => name.slice(0, 4)),
-      ["0000", "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011"]
+      [
+        "0000", "0001", "0002", "0003", "0004", "0005", "0006", "0007",
+        "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015"
+      ]
     );
     const migrationSources = await Promise.all(migrations.map((name) => readMigration(name)));
     const expectedTables = migrationSources
       .flatMap((sql) => [...sql.matchAll(/CREATE TABLE `([^`]+)`/g)].map((match) => match[1]))
       .sort();
-    assert.equal(expectedTables.length, 21);
+    assert.equal(expectedTables.length, 24);
 
     for (const migration of migrations.slice(0, 4)) {
       await runWrangler(configPath, stateRoot, ["--file", path.join(webRoot, "drizzle", migration)]);
@@ -56,14 +59,16 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
 
     await runWrangler(configPath, stateRoot, ["--command", legacyFixtures]);
 
-    for (const migration of migrations.slice(4, -1)) {
+    for (const migration of migrations.filter((name) => {
+      const version = Number(name.slice(0, 4));
+      return version >= 4 && version <= 10;
+    })) {
       await runWrangler(configPath, stateRoot, ["--file", path.join(webRoot, "drizzle", migration)]);
     }
     await runWrangler(configPath, stateRoot, ["--command", preKeyringAuthorizationFixtures]);
-    await runWrangler(configPath, stateRoot, [
-      "--file",
-      path.join(webRoot, "drizzle", migrations.at(-1))
-    ]);
+    for (const migration of migrations.filter((name) => Number(name.slice(0, 4)) >= 11)) {
+      await runWrangler(configPath, stateRoot, ["--file", path.join(webRoot, "drizzle", migration)]);
+    }
 
     const rows = await query(configPath, stateRoot, `
       SELECT 'inference' AS kind, privacy_mode, content_key_version, content_purged_at, digest_version
@@ -110,11 +115,31 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
     const inferenceColumns = await query(configPath, stateRoot, "PRAGMA table_info(inference_jobs);");
     assertColumn(inferenceColumns, "reserved_charge_micros", { type: "TEXT", notnull: 1, default: "'0'" });
     assertColumn(inferenceColumns, "reservation_expires_at", { type: "TEXT", notnull: 0, default: null });
+    assertColumn(inferenceColumns, "authorization_request_id", { type: "TEXT", notnull: 0, default: null });
+    assertColumn(inferenceColumns, "authorization_revision", { type: "INTEGER", notnull: 0, default: null });
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT job_id, authorization_request_id, authorization_revision
+      FROM inference_jobs
+      WHERE job_id IN ('legacy-inference', 'legacy-running')
+      ORDER BY job_id;
+    `), [
+      {
+        job_id: "legacy-inference",
+        authorization_request_id: "legacy-authorization-v1",
+        authorization_revision: 1
+      },
+      {
+        job_id: "legacy-running",
+        authorization_request_id: "legacy-authorization-v1",
+        authorization_revision: 1
+      }
+    ]);
     const artifactChunkColumns = await query(configPath, stateRoot, "PRAGMA table_info(artifact_chunks);");
     assertColumn(artifactChunkColumns, "upload_status", { type: "TEXT", notnull: 1, default: "'ready'" });
     const taskColumns = await query(configPath, stateRoot, "PRAGMA table_info(artifact_tasks);");
     assertColumn(taskColumns, "cancellation_requested_at", { type: "TEXT", notnull: 0, default: null });
     assertColumn(taskColumns, "execution_deadline_at", { type: "TEXT", notnull: 0, default: null });
+    assertColumn(taskColumns, "authorization_revision", { type: "INTEGER", notnull: 1, default: "1" });
     const eventColumns = await query(configPath, stateRoot, "PRAGMA table_info(marketplace_events);");
     assertColumn(eventColumns, "schema_version", { type: "INTEGER", notnull: 1, default: "1" });
     const authorizationColumns = await query(configPath, stateRoot, "PRAGMA table_info(authorization_requests);");
@@ -123,6 +148,18 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
     });
     assertColumn(authorizationColumns, "gateway_token_lookup_key_id", {
       type: "TEXT", notnull: 1, default: "'legacy-commitment-v2'"
+    });
+    assertColumn(authorizationColumns, "authorization_revision", {
+      type: "INTEGER", notnull: 1, default: "1"
+    });
+    assertColumn(authorizationColumns, "credential_rotated_at", {
+      type: "TEXT", notnull: 0, default: null
+    });
+    assertColumn(authorizationColumns, "revoked_at", {
+      type: "TEXT", notnull: 0, default: null
+    });
+    assertColumn(authorizationColumns, "revocation_reason_code", {
+      type: "TEXT", notnull: 0, default: null
     });
     assert.deepEqual(await query(configPath, stateRoot, `
       SELECT request_id, encrypted_gateway_token, gateway_token_iv,
@@ -199,6 +236,8 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
         AND name IN (
           'idx_authorization_requests_credential_status',
           'idx_authorization_requests_lookup_status',
+          'idx_inference_jobs_authorization_status',
+          'idx_artifact_tasks_authorization_status',
           'idx_agent_request_nonces_expires',
           'idx_cryptographic_key_canaries_domain_key'
         )
@@ -206,9 +245,11 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
     `);
     assert.deepEqual(hardeningIndexes, [
       { name: "idx_agent_request_nonces_expires" },
+      { name: "idx_artifact_tasks_authorization_status" },
       { name: "idx_authorization_requests_credential_status" },
       { name: "idx_authorization_requests_lookup_status" },
-      { name: "idx_cryptographic_key_canaries_domain_key" }
+      { name: "idx_cryptographic_key_canaries_domain_key" },
+      { name: "idx_inference_jobs_authorization_status" }
     ]);
     assert.deepEqual(await query(configPath, stateRoot, `
       SELECT name, "unique" AS is_unique, partial
@@ -218,6 +259,18 @@ test("D1 migrations preserve legacy rows and install runtime safeguards", { time
     assert.deepEqual(await query(configPath, stateRoot, `
       SELECT name FROM pragma_index_info('idx_cryptographic_key_canaries_domain_key') ORDER BY seqno;
     `), [{ name: "domain" }, { name: "key_id" }]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT name, "unique" AS is_unique, partial
+      FROM pragma_index_list('cryptographic_key_lifecycle_events')
+      WHERE name = 'idx_cryptographic_key_lifecycle_command_global';
+    `), [{ name: "idx_cryptographic_key_lifecycle_command_global", is_unique: 1, partial: 0 }]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT name FROM pragma_index_info('idx_cryptographic_key_lifecycle_command_global') ORDER BY seqno;
+    `), [{ name: "command_id" }]);
+    assert.deepEqual(await query(configPath, stateRoot, `
+      SELECT domain, provenance, consumed_at, consumed_command_id
+      FROM cryptographic_key_bootstrap_eligibility ORDER BY domain;
+    `), [], "a database with durable legacy history must not receive fresh-bootstrap eligibility");
 
     const deletionColumns = await query(configPath, stateRoot, "PRAGMA table_info(artifact_object_deletions);");
     assertColumn(deletionColumns, "storage_key", { type: "TEXT", notnull: 1, default: null });
@@ -346,6 +399,18 @@ const legacyFixtures = `
     'personal-api-key', 'provider-reported', 'legacy-evidence-v1', 'legacy-model', 'CN', '["P0"]',
     10, 1000, 1, 64, '2099-01-01T00:00:00.000Z', 'https://gateway.example.test/v3',
     'legacy-ciphertext-v1', 'legacy-iv-v1', 'legacy-raw-digest-v1', 1, 'approved',
+    '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z'
+  );
+  INSERT INTO capacity_offers (
+    offer_id, tenant_id, supplier_id, authorization_request_id, provider_id, source_type,
+    model, region_code, data_classes_json, requests_per_minute, tokens_per_minute,
+    concurrency, max_output_tokens, currency, price_micros_per_million_tokens, status,
+    valid_from, valid_until, version, created_at, updated_at
+  ) VALUES (
+    'offer-legacy', 'legacy-supplier-tenant', 'legacy-supplier', 'legacy-authorization-v1',
+    'legacy-provider', 'personal-api-key', 'legacy-model', 'CN', '["P0"]', 10, 1000,
+    1, 64, 'CNY', '1000', 'active', '2026-08-25T00:00:00.000Z',
+    '2099-01-01T00:00:00.000Z', 1,
     '2026-08-25T00:00:00.000Z', '2026-08-25T00:00:00.000Z'
   );
 `;

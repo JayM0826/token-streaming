@@ -85,6 +85,34 @@
       "when": 1787852815923,
       "tag": "0011_fixed_triathlon",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1787855865206,
+      "tag": "0012_living_titanium_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1787856614274,
+      "tag": "0013_burly_edwin_jarvis",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1787856883390,
+      "tag": "0014_yummy_gunslinger",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1787859088472,
+      "tag": "0015_sour_cerebro",
+      "breakpoints": true
     }
   ]
 }

@@ -11,7 +11,9 @@ import {
   type MarketplaceEvent,
   type MarketplacePrivacyMode,
   type RegisterSupplierRequest,
+  type RevokeAuthorizationRequest,
   type ReviewAuthorizationRequest,
+  type RotateAuthorizationCredentialRequest,
   type RunInferenceRequest,
   type RunInferenceResponse,
   type SetSupplyRequest,
@@ -33,6 +35,7 @@ import {
   recordSupplierVerification,
   registerSupplier,
   rehydrateSupplier,
+  revokeProviderAuthorization,
   requiredVerificationKinds
 } from "@token-streaming/marketplace-domain";
 
@@ -74,6 +77,25 @@ import {
 import { isAuthorizationValidityAllowed } from "./authorization-invariants";
 import { MAX_AGENT_AUTHORIZATIONS_PER_TOKEN } from "./agent-auth-invariants";
 import { isLikelySecretEvidenceReference } from "./sensitive-reference";
+import {
+  BIND_CAPACITY_OFFER_COMMAND_SQL,
+  BIND_AUTHORIZATION_LIFECYCLE_COMMAND_SQL,
+  CANCEL_LEASED_ARTIFACTS_FOR_REVOKED_AUTHORIZATION_SQL,
+  CLAIM_AUTHORIZATION_LIFECYCLE_TARGET_SQL,
+  CREATE_CAPACITY_OFFER_WITH_AUTHORIZATION_CAS_SQL,
+  DELETE_AGENT_HEARTBEAT_AFTER_AUTHORIZATION_REVOCATION_SQL,
+  DELETE_AGENT_HEARTBEAT_AFTER_CREDENTIAL_ROTATION_SQL,
+  FAIL_QUEUED_ARTIFACTS_FOR_REVOKED_AUTHORIZATION_SQL,
+  FAIL_RESERVED_INFERENCE_AFTER_CREDENTIAL_ROTATION_SQL,
+  FAIL_RESERVED_INFERENCE_FOR_REVOKED_AUTHORIZATION_SQL,
+  REVOKE_ACTIVE_AUTHORIZATION_SQL,
+  UPDATE_SUPPLIER_AFTER_AUTHORIZATION_REVOCATION_SQL,
+  WITHDRAW_PENDING_AUTHORIZATION_SQL,
+  authorizationCredentialRotationCommandBinding,
+  capacityOfferCommandBinding,
+  claimAuthorizationCredentialRotationTargetSql,
+  rotateAuthorizationCredentialSql
+} from "./authorization-lifecycle-invariants";
 
 interface SupplierRow {
   supplier_id: string;
@@ -116,10 +138,14 @@ interface AuthorizationRow {
   gateway_token_digest_version: number;
   gateway_token_lookup_key_id: string;
   encryption_key_version: number;
+  authorization_revision: number;
   status: AuthorizationRequestView["status"];
   review_note: string | null;
   review_command_id: string | null;
   reviewed_at: string | null;
+  credential_rotated_at: string | null;
+  revoked_at: string | null;
+  revocation_reason_code: RevokeAuthorizationRequest["reasonCode"] | null;
   created_at: string;
 }
 
@@ -150,6 +176,9 @@ interface OfferRow {
   gateway_token_iv?: string;
   credential_key_id?: string;
   encryption_key_version?: number;
+  authorization_revision?: number;
+  authorization_status?: AuthorizationRequestView["status"];
+  authorization_valid_until?: string;
 }
 
 interface EventRow {
@@ -170,6 +199,8 @@ interface JobRow {
   job_id: string;
   buyer_tenant_id?: string;
   offer_id: string;
+  authorization_request_id?: string | null;
+  authorization_revision?: number | null;
   model: string;
   privacy_mode: MarketplacePrivacyMode;
   prompt_digest?: string;
@@ -239,9 +270,12 @@ export async function getDashboard(identity: RequestIdentity): Promise<Marketpla
 
   const ownOffers = await db
     .prepare(
-      `SELECT o.*, s.display_name AS supplier_display_name
+      `SELECT o.*, s.display_name AS supplier_display_name,
+        ar.status AS authorization_status, ar.valid_until AS authorization_valid_until
        FROM capacity_offers o
        JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
+       JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id
+         AND ar.tenant_id = o.tenant_id AND ar.supplier_id = o.supplier_id
        WHERE o.tenant_id = ? ORDER BY o.created_at DESC LIMIT 50`
     )
     .bind(identity.tenantId)
@@ -320,7 +354,7 @@ export async function getDashboard(identity: RequestIdentity): Promise<Marketpla
       isAdmin: identity.isAdmin
     },
     supplier: supplier ? mapSupplier(supplier) : null,
-    authorizationRequests: ownAuthorizations.results.map(mapAuthorization),
+    authorizationRequests: ownAuthorizations.results.map((row) => mapAuthorization(row, now)),
     offers: ownOffers.results.map((row) => mapOffer(row, identity.tenantId, now)),
     marketOffers: marketOffers.results.map((row) => mapOffer(row, identity.tenantId, now)),
     usage,
@@ -328,7 +362,7 @@ export async function getDashboard(identity: RequestIdentity): Promise<Marketpla
     jobs: jobs.results.map(mapJob),
     artifacts,
     artifactTasks,
-    pendingReviews: pendingReviews.results.map(mapAuthorization),
+    pendingReviews: pendingReviews.results.map((row) => mapAuthorization(row, now)),
     privacy: {
       supplierReceivesPlaintext: true,
       providerReceivesPlaintext: true,
@@ -670,6 +704,266 @@ export async function reviewAuthorization(
   return getDashboard(identity);
 }
 
+export async function revokeAuthorization(
+  identity: RequestIdentity,
+  requestId: string,
+  input: RevokeAuthorizationRequest
+): Promise<MarketplaceDashboardSnapshot> {
+  await ensureSchema();
+  assertIdentifier(requestId, "requestId");
+  assertExactKeys(input, ["commandId", "reasonCode"]);
+  assertIdentifier(input.commandId, "commandId");
+  assertAuthorizationRevocationReason(input.reasonCode);
+  const supplier = await requireSupplierRow(identity);
+  const db = getD1();
+  const request = await db.prepare(
+    `SELECT * FROM authorization_requests
+     WHERE request_id = ? AND tenant_id = ? AND supplier_id = ?`
+  ).bind(requestId, identity.tenantId, supplier.supplier_id).first<AuthorizationRow>();
+  if (!request) throw new ApiError("NOT_FOUND", "授权不存在。", 404);
+
+  const binding = `${requestId}:${input.reasonCode}`;
+  const [withdrawReplay, revokeReplay] = await Promise.all([
+    readIdempotency(identity.tenantId, "authorization.withdraw", input.commandId),
+    readIdempotency(identity.tenantId, "authorization.revoke", input.commandId)
+  ]);
+  const replay = withdrawReplay ?? revokeReplay;
+  if (replay) {
+    if (replay !== binding) {
+      throw new ApiError("AUTHORIZATION_STATE_CONFLICT", "该命令已绑定到其他授权生命周期操作。", 409);
+    }
+    return getDashboard(identity);
+  }
+  await enforceTenantRateLimit(identity, "authorization.lifecycle", 30, 60 * 60_000);
+  const now = new Date().toISOString();
+  if (request.status === "pending") {
+    await withdrawPendingAuthorization(identity, supplier, request, input, binding, now);
+    return getDashboard(identity);
+  }
+  if (request.status !== "approved" || request.valid_until <= now) {
+    throw new ApiError("AUTHORIZATION_STATE_CONFLICT", "只有当前有效的已批准授权可以撤销。", 409);
+  }
+  await revokeApprovedAuthorization(identity, supplier, request, input, binding, now);
+  return getDashboard(identity);
+}
+
+export async function rotateAuthorizationCredential(
+  identity: RequestIdentity,
+  requestId: string,
+  input: RotateAuthorizationCredentialRequest
+): Promise<MarketplaceDashboardSnapshot> {
+  await ensureSchema();
+  assertIdentifier(requestId, "requestId");
+  assertExactKeys(input, ["commandId", "reasonCode", "gatewayBearerToken"]);
+  assertIdentifier(input.commandId, "commandId");
+  assertGatewayCredentialRotationReason(input.reasonCode);
+  validateGatewayBearerToken(input.gatewayBearerToken);
+  const supplier = await requireSupplierRow(identity);
+  const db = getD1();
+  const request = await db.prepare(
+    `SELECT * FROM authorization_requests
+     WHERE request_id = ? AND tenant_id = ? AND supplier_id = ?`
+  ).bind(requestId, identity.tenantId, supplier.supplier_id).first<AuthorizationRow>();
+  if (!request) throw new ApiError("NOT_FOUND", "授权不存在。", 404);
+
+  const [credentialLookups, legacyCredentialDigest] = await Promise.all([
+    createCredentialLookupDigests(input.gatewayBearerToken),
+    sha256Hex(input.gatewayBearerToken)
+  ]);
+  const activeLookup = credentialLookups[0]!;
+  const binding = authorizationCredentialRotationCommandBinding(
+    requestId,
+    input.reasonCode,
+    legacyCredentialDigest
+  );
+  const replay = await readIdempotency(
+    identity.tenantId,
+    "authorization.rotate-credential",
+    input.commandId
+  );
+  if (replay) {
+    if (replay !== binding) {
+      throw new ApiError("GATEWAY_CREDENTIAL_CONFLICT", "该换发命令已绑定到其他授权或凭据。", 409);
+    }
+    return getDashboard(identity);
+  }
+  const now = new Date().toISOString();
+  if (request.status !== "approved" || request.valid_until <= now || !request.encrypted_gateway_token) {
+    throw new ApiError("AUTHORIZATION_STATE_CONFLICT", "只有当前有效的已批准授权可以换发凭据。", 409);
+  }
+  await enforceTenantRateLimit(identity, "authorization.rotate-credential", 10, 60 * 60_000);
+  const currentToken = await decryptCredential(
+    request.encrypted_gateway_token,
+    request.gateway_token_iv,
+    request.encryption_key_version,
+    request.credential_key_id,
+    { tenantId: request.tenant_id, authorizationRequestId: request.request_id }
+  );
+  if (currentToken === input.gatewayBearerToken) {
+    throw new ApiError("GATEWAY_CREDENTIAL_CONFLICT", "新 Gateway token 必须不同于当前 token。", 409);
+  }
+
+  const gateway = validateGatewayEndpoint(request.gateway_endpoint, true);
+  const attestation = await attestSupplierGateway(gateway, input.gatewayBearerToken, {
+    providerId: request.provider_id,
+    modelPattern: request.model_pattern,
+    dataClasses: parseDataClasses(request.data_classes_json),
+    limits: {
+      requestsPerMinute: request.requests_per_minute,
+      tokensPerMinute: request.tokens_per_minute,
+      concurrency: request.concurrency,
+      maxOutputTokens: request.max_output_tokens
+    }
+  });
+  const encrypted = await encryptCredential(input.gatewayBearerToken, {
+    tenantId: request.tenant_id,
+    authorizationRequestId: request.request_id
+  });
+  const operationToken = `authorization-rotate-op-${crypto.randomUUID()}`;
+  const targetKey = `${requestId}:${request.authorization_revision}`;
+  const operation = "authorization.rotate-credential";
+  const nextRevision = request.authorization_revision + 1;
+  await db.batch([
+    db.prepare(claimAuthorizationCredentialRotationTargetSql(
+      credentialLookups.length,
+      MAX_AGENT_AUTHORIZATIONS_PER_TOKEN
+    )).bind(
+      targetKey,
+      operationToken,
+      now,
+      requestId,
+      identity.tenantId,
+      supplier.supplier_id,
+      now,
+      request.authorization_revision,
+      request.encrypted_gateway_token,
+      request.gateway_token_iv,
+      request.credential_key_id,
+      request.encryption_key_version,
+      supplier.version,
+      requestId,
+      now,
+      legacyCredentialDigest,
+      ...credentialLookups.flatMap((candidate) => [candidate.version, candidate.keyId, candidate.digest]),
+      identity.tenantId,
+      supplier.supplier_id,
+      requestId,
+      now,
+      legacyCredentialDigest,
+      ...credentialLookups.flatMap((candidate) => [candidate.version, candidate.keyId, candidate.digest]),
+      identity.tenantId,
+      operation,
+      input.commandId,
+      binding
+    ),
+    lifecycleCommandBinding(
+      db, identity.tenantId, operation, input.commandId,
+      binding, targetKey, operationToken, now
+    ),
+    db.prepare(rotateAuthorizationCredentialSql(
+      credentialLookups.length,
+      MAX_AGENT_AUTHORIZATIONS_PER_TOKEN
+    )).bind(
+      encrypted.ciphertext,
+      encrypted.iv,
+      encrypted.keyId,
+      activeLookup.digest,
+      activeLookup.version,
+      activeLookup.keyId,
+      encrypted.keyVersion,
+      now,
+      now,
+      requestId,
+      identity.tenantId,
+      supplier.supplier_id,
+      now,
+      request.authorization_revision,
+      request.encrypted_gateway_token,
+      request.gateway_token_iv,
+      request.credential_key_id,
+      request.encryption_key_version,
+      requestId,
+      now,
+      legacyCredentialDigest,
+      ...credentialLookups.flatMap((candidate) => [candidate.version, candidate.keyId, candidate.digest]),
+      identity.tenantId,
+      supplier.supplier_id,
+      requestId,
+      now,
+      legacyCredentialDigest,
+      ...credentialLookups.flatMap((candidate) => [candidate.version, candidate.keyId, candidate.digest]),
+      targetKey,
+      operationToken,
+      identity.tenantId,
+      input.commandId,
+      binding
+    ),
+    db.prepare(FAIL_RESERVED_INFERENCE_AFTER_CREDENTIAL_ROTATION_SQL).bind(
+      now,
+      requestId,
+      request.authorization_revision,
+      requestId,
+      requestId,
+      request.authorization_revision,
+      requestId,
+      identity.tenantId,
+      supplier.supplier_id,
+      nextRevision,
+      activeLookup.digest
+    ),
+    db.prepare(DELETE_AGENT_HEARTBEAT_AFTER_CREDENTIAL_ROTATION_SQL).bind(
+      identity.tenantId, requestId, identity.tenantId, supplier.supplier_id,
+      nextRevision, activeLookup.digest
+    ),
+    guardedAuthorizationLifecycleAuditInsert(
+      db,
+      identity,
+      "authorization.credential-rotated",
+      requestId,
+      "approved",
+      nextRevision,
+      operation,
+      input.commandId,
+      binding,
+      {
+        reasonCode: input.reasonCode,
+        gatewayHost: gateway.hostname,
+        authorizationRevision: nextRevision,
+        attestedModelCount: attestation.matchedModels.length
+      },
+      now
+    )
+  ]);
+  const rotated = await db.prepare(
+    `SELECT status, authorization_revision, gateway_token_digest,
+      EXISTS (
+        SELECT 1 FROM idempotency_keys
+        WHERE tenant_id = ? AND operation = 'authorization.rotate-credential'
+          AND idempotency_key = ? AND resource_id = ?
+      ) AS command_bound
+     FROM authorization_requests WHERE request_id = ? AND tenant_id = ? AND supplier_id = ?`
+  ).bind(
+    identity.tenantId,
+    input.commandId,
+    binding,
+    requestId,
+    identity.tenantId,
+    supplier.supplier_id
+  ).first<{
+    status: string;
+    authorization_revision: number;
+    gateway_token_digest: string | null;
+    command_bound: number;
+  }>();
+  if (
+    rotated?.status !== "approved" || rotated.authorization_revision !== nextRevision ||
+    rotated.gateway_token_digest !== activeLookup.digest || rotated.command_bound !== 1
+  ) {
+    throw new ApiError("GATEWAY_CREDENTIAL_CONFLICT", "授权在凭据换发期间发生变化。", 409, true);
+  }
+  return getDashboard(identity);
+}
+
 export async function createCapacityOffer(
   identity: RequestIdentity,
   input: CreateCapacityOfferRequest
@@ -684,16 +978,33 @@ export async function createCapacityOffer(
     "priceMicrosPerMillionTokens",
     "validUntil"
   ]);
-  const prior = await readIdempotency(identity.tenantId, "offer.create", input.commandId);
-  if (prior) return getDashboard(identity);
-  await enforceTenantRateLimit(identity, "offer.create", 30, 60 * 60_000);
   assertIdentifier(input.commandId, "commandId");
   assertIdentifier(input.authorizationRequestId, "authorizationRequestId");
   assertText(input.model, "model", 120);
   assertDataClasses(input.dataClasses);
   assertLimits(input.limits);
   assertPositiveIntegerString(input.priceMicrosPerMillionTokens, "priceMicrosPerMillionTokens");
-  const validUntil = assertFutureTimestamp(input.validUntil, "validUntil");
+  const normalizedModel = input.model.trim();
+  const normalizedDataClasses = [...input.dataClasses].sort() as Array<"P0" | "P1">;
+  const normalizedPrice = BigInt(input.priceMicrosPerMillionTokens).toString();
+  const normalizedValidUntil = normalizeUtcTimestamp(input.validUntil, "validUntil");
+  const binding = capacityOfferCommandBinding({
+    authorizationRequestId: input.authorizationRequestId,
+    model: normalizedModel,
+    dataClasses: normalizedDataClasses,
+    limits: input.limits,
+    priceMicrosPerMillionTokens: normalizedPrice,
+    validUntil: normalizedValidUntil
+  });
+  const prior = await readIdempotency(identity.tenantId, "offer.create", input.commandId);
+  if (prior) {
+    if (prior !== binding) {
+      throw new ApiError("CONFLICT", "该报价命令已绑定到其他规范化请求。", 409);
+    }
+    return getDashboard(identity);
+  }
+  const validUntil = assertFutureTimestamp(normalizedValidUntil, "validUntil");
+  await enforceTenantRateLimit(identity, "offer.create", 30, 60 * 60_000);
 
   const db = getD1();
   const supplier = await requireSupplierRow(identity);
@@ -718,12 +1029,12 @@ export async function createCapacityOffer(
         offerId,
         authorizationId: `authorization-${authorization.request_id}`,
         providerId: authorization.provider_id,
-        model: input.model.trim(),
+        model: normalizedModel,
         regionCode: authorization.region_code,
-        dataClasses: input.dataClasses,
+        dataClasses: normalizedDataClasses,
         limits: input.limits,
         currency: "CNY",
-        rates: [{ unit: "million_tokens", amountMicros: input.priceMicrosPerMillionTokens }],
+        rates: [{ unit: "million_tokens", amountMicros: normalizedPrice }],
         validFrom: now,
         validUntil: validUntil.toISOString()
       },
@@ -732,16 +1043,8 @@ export async function createCapacityOffer(
   );
 
   await db.batch([
-    eventInsert(db, event),
     db
-      .prepare(
-        `INSERT INTO capacity_offers (
-          offer_id, tenant_id, supplier_id, authorization_request_id, provider_id, source_type,
-          model, region_code, data_classes_json, requests_per_minute, tokens_per_minute,
-          concurrency, max_output_tokens, currency, price_micros_per_million_tokens, status,
-          valid_from, valid_until, version, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CNY', ?, 'active', ?, ?, 1, ?, ?)`
-      )
+      .prepare(CREATE_CAPACITY_OFFER_WITH_AUTHORIZATION_CAS_SQL)
       .bind(
         offerId,
         identity.tenantId,
@@ -749,25 +1052,46 @@ export async function createCapacityOffer(
         authorization.request_id,
         authorization.provider_id,
         authorization.source_type,
-        input.model.trim(),
+        normalizedModel,
         authorization.region_code,
-        JSON.stringify(input.dataClasses),
+        JSON.stringify(normalizedDataClasses),
         input.limits.requestsPerMinute,
         input.limits.tokensPerMinute,
         input.limits.concurrency,
         input.limits.maxOutputTokens,
-        input.priceMicrosPerMillionTokens,
+        normalizedPrice,
         now,
         validUntil.toISOString(),
         now,
-        now
+        now,
+        authorization.request_id,
+        identity.tenantId,
+        supplier.supplier_id,
+        authorization.authorization_revision,
+        now,
+        validUntil.toISOString(),
+        supplier.version,
+        identity.tenantId,
+        input.commandId
       ),
-    auditInsert(db, identity, "offer.published", "capacity-offer", offerId, {
-      model: input.model.trim(),
+    guardedCapacityOfferEventInsert(db, event, offerId, identity.tenantId),
+    guardedCapacityOfferAuditInsert(db, identity, offerId, {
+      model: normalizedModel,
       authorizationRequestId: authorization.request_id
     }, now),
-    idempotencyInsert(db, identity.tenantId, "offer.create", input.commandId, offerId, now)
+    db.prepare(BIND_CAPACITY_OFFER_COMMAND_SQL).bind(
+      identity.tenantId, input.commandId, binding, now,
+      offerId, identity.tenantId, supplier.supplier_id
+    )
   ]);
+
+  const committedOffer = await readIdempotency(identity.tenantId, "offer.create", input.commandId);
+  if (!committedOffer) {
+    throw new ApiError("AUTHORIZATION_STATE_CONFLICT", "授权在报价发布期间发生变化。", 409, true);
+  }
+  if (committedOffer !== binding) {
+    throw new ApiError("CONFLICT", "该报价命令已绑定到其他规范化请求。", 409);
+  }
 
   return getDashboard(identity);
 }
@@ -789,13 +1113,69 @@ export async function setSupplyState(
     throw new ApiError("SUPPLIER_NOT_ACTIVE", "审核通过后才能开启供应。", 409);
   }
   const now = new Date().toISOString();
-  await db.batch([
+  const results = await db.batch([
     db
-      .prepare("UPDATE suppliers SET supply_enabled = ?, updated_at = ? WHERE supplier_id = ? AND tenant_id = ?")
-      .bind(input.enabled ? 1 : 0, now, supplier.supplier_id, identity.tenantId),
-    auditInsert(db, identity, input.enabled ? "supply.enabled" : "supply.disabled", "supplier", supplier.supplier_id, {}, now),
-    idempotencyInsert(db, identity.tenantId, "supply.set", input.commandId, supplier.supplier_id, now)
+      .prepare(
+        `UPDATE suppliers SET supply_enabled = ?, updated_at = ?
+         WHERE supplier_id = ? AND tenant_id = ? AND (
+           ? = 0 OR EXISTS (
+             SELECT 1 FROM authorization_requests
+             WHERE tenant_id = ? AND supplier_id = ? AND status = 'approved' AND valid_until > ?
+               AND encrypted_gateway_token <> '' AND gateway_token_iv <> ''
+               AND gateway_token_digest IS NOT NULL
+           )
+         )`
+      )
+      .bind(
+        input.enabled ? 1 : 0,
+        now,
+        supplier.supplier_id,
+        identity.tenantId,
+        input.enabled ? 1 : 0,
+        identity.tenantId,
+        supplier.supplier_id,
+        now
+      ),
+    db.prepare(
+      `INSERT INTO audit_events (
+        audit_id, tenant_id, actor_id, action, resource_type, resource_id, details_json, occurred_at
+      ) SELECT ?, ?, ?, ?, 'supplier', ?, '{}', ?
+        WHERE EXISTS (
+          SELECT 1 FROM suppliers
+          WHERE supplier_id = ? AND tenant_id = ? AND supply_enabled = ?
+        )`
+    ).bind(
+      `audit-${crypto.randomUUID()}`,
+      identity.tenantId,
+      identity.actorId,
+      input.enabled ? "supply.enabled" : "supply.disabled",
+      supplier.supplier_id,
+      now,
+      supplier.supplier_id,
+      identity.tenantId,
+      input.enabled ? 1 : 0
+    ),
+    db.prepare(
+      `INSERT INTO idempotency_keys (
+        tenant_id, operation, idempotency_key, resource_id, created_at
+      ) SELECT ?, 'supply.set', ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM suppliers
+          WHERE supplier_id = ? AND tenant_id = ? AND supply_enabled = ?
+        )`
+    ).bind(
+      identity.tenantId,
+      input.commandId,
+      supplier.supplier_id,
+      now,
+      supplier.supplier_id,
+      identity.tenantId,
+      input.enabled ? 1 : 0
+    )
   ]);
+  if ((results[0]?.meta.changes ?? 0) !== 1) {
+    throw new ApiError("AUTHORIZATION_REQUIRED", "至少需要一条当前有效授权才能开启供应。", 409);
+  }
   return getDashboard(identity);
 }
 
@@ -828,6 +1208,10 @@ export async function runInference(
 
   const now = new Date().toISOString();
   const offer = await selectOffer(identity.tenantId, input, now);
+  const authorizationRevision = requiredPositiveInteger(
+    offer.authorization_revision,
+    "authorizationRevision"
+  );
   const estimatedInputTokens = Math.max(1, new TextEncoder().encode(input.input).byteLength);
   const estimatedCharge = estimateMaximumChargeMicros({
     estimatedInputTokens: estimatedInputTokens + 256,
@@ -852,6 +1236,8 @@ export async function runInference(
       identity.tenantId,
       offer.supplier_tenant_id,
       offer.offer_id,
+      offer.authorization_request_id,
+      authorizationRevision,
       idempotencyKey,
       input.model,
       input.dataClass,
@@ -867,6 +1253,10 @@ export async function runInference(
       identity.tenantId,
       estimatedCharge,
       offer.offer_id,
+      offer.authorization_request_id,
+      authorizationRevision,
+      offer.supplier_tenant_id,
+      identity.tenantId,
       now,
       now,
       now,
@@ -1166,6 +1556,390 @@ async function readSupplierEvents(tenantId: string, supplierId: string): Promise
   })) as SupplierEvent[];
 }
 
+async function withdrawPendingAuthorization(
+  identity: RequestIdentity,
+  supplier: SupplierRow,
+  request: AuthorizationRow,
+  input: RevokeAuthorizationRequest,
+  binding: string,
+  now: string
+): Promise<void> {
+  const db = getD1();
+  const operation = "authorization.withdraw";
+  const operationToken = `authorization-withdraw-op-${crypto.randomUUID()}`;
+  const targetKey = `${request.request_id}:${request.authorization_revision}`;
+  const nextRevision = request.authorization_revision + 1;
+  await db.batch([
+    lifecycleTargetClaim(
+      db, identity, supplier, request, operation, input.commandId,
+      binding, operationToken, targetKey, now
+    ),
+    lifecycleCommandBinding(
+      db, identity.tenantId, operation, input.commandId,
+      binding, targetKey, operationToken, now
+    ),
+    db.prepare(WITHDRAW_PENDING_AUTHORIZATION_SQL).bind(
+      now,
+      input.reasonCode,
+      now,
+      request.request_id,
+      identity.tenantId,
+      supplier.supplier_id,
+      request.authorization_revision,
+      targetKey,
+      operationToken,
+      identity.tenantId,
+      input.commandId,
+      binding
+    ),
+    guardedAuthorizationLifecycleAuditInsert(
+      db,
+      identity,
+      "authorization.withdrawn",
+      request.request_id,
+      "withdrawn",
+      nextRevision,
+      operation,
+      input.commandId,
+      binding,
+      { reasonCode: input.reasonCode, authorizationRevision: nextRevision },
+      now
+    )
+  ]);
+  const withdrawn = await db.prepare(
+    `SELECT status, authorization_revision, encrypted_gateway_token, gateway_token_iv,
+      EXISTS (
+        SELECT 1 FROM idempotency_keys
+        WHERE tenant_id = ? AND operation = 'authorization.withdraw'
+          AND idempotency_key = ? AND resource_id = ?
+      ) AS command_bound,
+      gateway_token_digest FROM authorization_requests
+     WHERE request_id = ? AND tenant_id = ? AND supplier_id = ?`
+  ).bind(
+    identity.tenantId,
+    input.commandId,
+    binding,
+    request.request_id,
+    identity.tenantId,
+    supplier.supplier_id
+  ).first<{
+    status: string;
+    authorization_revision: number;
+    encrypted_gateway_token: string;
+    gateway_token_iv: string;
+    gateway_token_digest: string | null;
+    command_bound: number;
+  }>();
+  if (
+    withdrawn?.status !== "withdrawn" || withdrawn.authorization_revision !== nextRevision ||
+    withdrawn.encrypted_gateway_token !== "" || withdrawn.gateway_token_iv !== "" ||
+    withdrawn.gateway_token_digest !== null || withdrawn.command_bound !== 1
+  ) {
+    throw new ApiError("AUTHORIZATION_STATE_CONFLICT", "授权申请在撤回期间发生变化。", 409, true);
+  }
+}
+
+async function revokeApprovedAuthorization(
+  identity: RequestIdentity,
+  supplier: SupplierRow,
+  request: AuthorizationRow,
+  input: RevokeAuthorizationRequest,
+  binding: string,
+  now: string
+): Promise<void> {
+  const history = await readSupplierEvents(identity.tenantId, supplier.supplier_id);
+  const state = rehydrateSupplier(history);
+  if (!state || state.version !== supplier.version) {
+    throw new ApiError("AUTHORIZATION_STATE_CONFLICT", "供应商聚合状态已变化，请重试。", 409, true);
+  }
+  const event = mapDomainError(() => revokeProviderAuthorization(
+    state,
+    {
+      authorizationId: `authorization-${request.request_id}`,
+      reasonCode: input.reasonCode
+    },
+    commandContext(identity, input.commandId, now)
+  ));
+  const db = getD1();
+  const operation = "authorization.revoke";
+  const operationToken = `authorization-revoke-op-${crypto.randomUUID()}`;
+  const targetKey = `${request.request_id}:${request.authorization_revision}`;
+  const nextRevision = request.authorization_revision + 1;
+  await db.batch([
+    lifecycleTargetClaim(
+      db, identity, supplier, request, operation, input.commandId,
+      binding, operationToken, targetKey, now
+    ),
+    lifecycleCommandBinding(
+      db, identity.tenantId, operation, input.commandId,
+      binding, targetKey, operationToken, now
+    ),
+    db.prepare(REVOKE_ACTIVE_AUTHORIZATION_SQL).bind(
+      now,
+      input.reasonCode,
+      now,
+      request.request_id,
+      identity.tenantId,
+      supplier.supplier_id,
+      now,
+      request.authorization_revision,
+      supplier.supplier_id,
+      identity.tenantId,
+      supplier.version,
+      targetKey,
+      operationToken,
+      identity.tenantId,
+      input.commandId,
+      binding
+    ),
+    db.prepare(UPDATE_SUPPLIER_AFTER_AUTHORIZATION_REVOCATION_SQL).bind(
+      event.aggregateVersion,
+      now,
+      now,
+      supplier.supplier_id,
+      identity.tenantId,
+      supplier.version,
+      request.request_id,
+      identity.tenantId,
+      supplier.supplier_id,
+      nextRevision
+    ),
+    guardedAuthorizationLifecycleEventInsert(
+      db,
+      event,
+      request.request_id,
+      nextRevision,
+      event.aggregateVersion,
+      targetKey,
+      operationToken
+    ),
+    db.prepare(FAIL_RESERVED_INFERENCE_FOR_REVOKED_AUTHORIZATION_SQL).bind(
+      now,
+      request.request_id,
+      request.request_id,
+      request.request_id,
+      request.request_id,
+      nextRevision
+    ),
+    db.prepare(FAIL_QUEUED_ARTIFACTS_FOR_REVOKED_AUTHORIZATION_SQL).bind(
+      now,
+      now,
+      request.request_id,
+      request.request_id,
+      nextRevision
+    ),
+    db.prepare(CANCEL_LEASED_ARTIFACTS_FOR_REVOKED_AUTHORIZATION_SQL).bind(
+      now,
+      now,
+      request.request_id,
+      request.request_id,
+      nextRevision
+    ),
+    db.prepare(DELETE_AGENT_HEARTBEAT_AFTER_AUTHORIZATION_REVOCATION_SQL).bind(
+      identity.tenantId,
+      request.request_id,
+      identity.tenantId,
+      supplier.supplier_id,
+      nextRevision
+    ),
+    guardedAuthorizationLifecycleAuditInsert(
+      db,
+      identity,
+      "authorization.revoked",
+      request.request_id,
+      "revoked",
+      nextRevision,
+      operation,
+      input.commandId,
+      binding,
+      { reasonCode: input.reasonCode, authorizationRevision: nextRevision },
+      now,
+      event.eventId
+    )
+  ]);
+  const revoked = await db.prepare(
+    `SELECT ar.status, ar.authorization_revision, ar.encrypted_gateway_token,
+      ar.gateway_token_iv, ar.gateway_token_digest, s.version AS supplier_version,
+      EXISTS (
+        SELECT 1 FROM idempotency_keys
+        WHERE tenant_id = ? AND operation = 'authorization.revoke'
+          AND idempotency_key = ? AND resource_id = ?
+      ) AS command_bound
+     FROM authorization_requests ar
+     JOIN suppliers s ON s.supplier_id = ar.supplier_id AND s.tenant_id = ar.tenant_id
+     WHERE ar.request_id = ? AND ar.tenant_id = ? AND ar.supplier_id = ?`
+  ).bind(
+    identity.tenantId,
+    input.commandId,
+    binding,
+    request.request_id,
+    identity.tenantId,
+    supplier.supplier_id
+  ).first<{
+    status: string;
+    authorization_revision: number;
+    encrypted_gateway_token: string;
+    gateway_token_iv: string;
+    gateway_token_digest: string | null;
+    supplier_version: number;
+    command_bound: number;
+  }>();
+  if (
+    revoked?.status !== "revoked" || revoked.authorization_revision !== nextRevision ||
+    revoked.encrypted_gateway_token !== "" || revoked.gateway_token_iv !== "" ||
+    revoked.gateway_token_digest !== null || revoked.supplier_version !== event.aggregateVersion ||
+    revoked.command_bound !== 1
+  ) {
+    throw new ApiError("AUTHORIZATION_STATE_CONFLICT", "授权在撤销期间发生变化。", 409, true);
+  }
+}
+
+function lifecycleTargetClaim(
+  db: D1Database,
+  identity: RequestIdentity,
+  supplier: SupplierRow,
+  request: AuthorizationRow,
+  operation: string,
+  commandId: string,
+  binding: string,
+  operationToken: string,
+  targetKey: string,
+  now: string
+): D1PreparedStatement {
+  return db.prepare(CLAIM_AUTHORIZATION_LIFECYCLE_TARGET_SQL).bind(
+    targetKey,
+    operationToken,
+    now,
+    request.request_id,
+    identity.tenantId,
+    supplier.supplier_id,
+    request.status,
+    request.authorization_revision,
+    supplier.version,
+    identity.tenantId,
+    operation,
+    commandId,
+    binding
+  );
+}
+
+function lifecycleCommandBinding(
+  db: D1Database,
+  tenantId: string,
+  operation: string,
+  commandId: string,
+  binding: string,
+  targetKey: string,
+  operationToken: string,
+  now: string
+): D1PreparedStatement {
+  return db.prepare(BIND_AUTHORIZATION_LIFECYCLE_COMMAND_SQL).bind(
+    tenantId,
+    operation,
+    commandId,
+    binding,
+    now,
+    targetKey,
+    operationToken
+  );
+}
+
+function guardedAuthorizationLifecycleEventInsert(
+  db: D1Database,
+  event: SupplierEvent,
+  requestId: string,
+  authorizationRevision: number,
+  supplierVersion: number,
+  targetKey: string,
+  operationToken: string
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO marketplace_events (
+      event_id, tenant_id, actor_id, causation_id, aggregate_type, aggregate_id,
+      aggregate_version, event_type, schema_version, payload_json, occurred_at
+    ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM authorization_requests
+        WHERE request_id = ? AND status = 'revoked' AND authorization_revision = ?
+      ) AND EXISTS (
+        SELECT 1 FROM suppliers
+        WHERE supplier_id = ? AND tenant_id = ? AND version = ?
+      ) AND EXISTS (
+        SELECT 1 FROM idempotency_keys
+        WHERE tenant_id = 'platform' AND operation = 'authorization.lifecycle-target'
+          AND idempotency_key = ? AND resource_id = ?
+      )`
+  ).bind(
+    event.eventId,
+    event.tenantId,
+    event.actorId,
+    event.causationId,
+    event.aggregateType,
+    event.aggregateId,
+    event.aggregateVersion,
+    event.type,
+    event.schemaVersion,
+    JSON.stringify(event.payload),
+    event.occurredAt,
+    requestId,
+    authorizationRevision,
+    event.aggregateId,
+    event.tenantId,
+    supplierVersion,
+    targetKey,
+    operationToken
+  );
+}
+
+function guardedAuthorizationLifecycleAuditInsert(
+  db: D1Database,
+  identity: RequestIdentity,
+  action: "authorization.withdrawn" | "authorization.revoked" | "authorization.credential-rotated",
+  requestId: string,
+  status: "withdrawn" | "revoked" | "approved",
+  authorizationRevision: number,
+  operation: string,
+  commandId: string,
+  binding: string,
+  details: Record<string, unknown>,
+  occurredAt: string,
+  requiredEventId?: string
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT OR IGNORE INTO audit_events (
+      audit_id, tenant_id, actor_id, action, resource_type, resource_id, details_json, occurred_at
+    ) SELECT ?, ?, ?, ?, 'authorization-request', ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM authorization_requests
+        WHERE request_id = ? AND tenant_id = ? AND status = ? AND authorization_revision = ?
+      ) AND EXISTS (
+        SELECT 1 FROM idempotency_keys
+        WHERE tenant_id = ? AND operation = ? AND idempotency_key = ? AND resource_id = ?
+      ) AND (? IS NULL OR EXISTS (
+        SELECT 1 FROM marketplace_events WHERE event_id = ? AND tenant_id = ?
+      ))`
+  ).bind(
+    `audit-authorization-lifecycle-${identity.tenantId}-${operation}-${commandId}`,
+    identity.tenantId,
+    identity.actorId,
+    action,
+    requestId,
+    JSON.stringify(details),
+    occurredAt,
+    requestId,
+    identity.tenantId,
+    status,
+    authorizationRevision,
+    identity.tenantId,
+    operation,
+    commandId,
+    binding,
+    requiredEventId ?? null,
+    requiredEventId ?? null,
+    identity.tenantId
+  );
+}
+
 async function buildApprovalEvents(
   admin: RequestIdentity,
   request: AuthorizationRow,
@@ -1250,7 +2024,7 @@ async function selectOffer(buyerTenantId: string, input: RunInferenceRequest, no
     .prepare(
       `SELECT o.*, s.display_name AS supplier_display_name, s.tenant_id AS supplier_tenant_id,
               ar.gateway_endpoint, ar.encrypted_gateway_token, ar.gateway_token_iv,
-              ar.credential_key_id, ar.encryption_key_version
+              ar.credential_key_id, ar.encryption_key_version, ar.authorization_revision
        FROM capacity_offers o
        JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
        JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id AND ar.status = 'approved'
@@ -1566,7 +2340,7 @@ function mapSupplier(row: SupplierRow): SupplierProfileView {
   };
 }
 
-function mapAuthorization(row: AuthorizationRow): AuthorizationRequestView {
+function mapAuthorization(row: AuthorizationRow, now: string): AuthorizationRequestView {
   return {
     requestId: row.request_id,
     supplierId: row.supplier_id,
@@ -1585,14 +2359,22 @@ function mapAuthorization(row: AuthorizationRow): AuthorizationRequestView {
     evidenceRef: row.evidence_ref,
     gatewayHost: new URL(row.gateway_endpoint).hostname,
     validUntil: row.valid_until,
-    status: row.status,
+    status: row.status === "approved" && row.valid_until <= now ? "expired" : row.status,
     reviewNote: row.review_note,
+    authorizationRevision: row.authorization_revision,
+    credentialRotatedAt: row.credential_rotated_at,
+    revokedAt: row.revoked_at,
+    revocationReasonCode: row.revocation_reason_code,
     createdAt: row.created_at,
     reviewedAt: row.reviewed_at
   };
 }
 
 function mapOffer(row: OfferRow, tenantId: string, now: string): CapacityOfferView {
+  const authorizationUnavailable = row.authorization_status !== undefined && (
+    row.authorization_status !== "approved" ||
+    (row.authorization_valid_until !== undefined && row.authorization_valid_until <= now)
+  );
   return {
     offerId: row.offer_id,
     supplierId: row.supplier_id,
@@ -1610,7 +2392,7 @@ function mapOffer(row: OfferRow, tenantId: string, now: string): CapacityOfferVi
     },
     currency: "CNY",
     priceMicrosPerMillionTokens: row.price_micros_per_million_tokens,
-    status: row.valid_until <= now ? "expired" : row.status,
+    status: row.valid_until <= now ? "expired" : authorizationUnavailable ? "paused" : row.status,
     validFrom: row.valid_from,
     validUntil: row.valid_until,
     createdAt: row.created_at,
@@ -1700,6 +2482,37 @@ function eventInsert(db: D1Database, event: MarketplaceEvent): D1PreparedStateme
       JSON.stringify(event.payload),
       event.occurredAt
     );
+}
+
+function guardedCapacityOfferEventInsert(
+  db: D1Database,
+  event: MarketplaceEvent,
+  offerId: string,
+  tenantId: string
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO marketplace_events (
+      event_id, tenant_id, actor_id, causation_id, aggregate_type, aggregate_id,
+      aggregate_version, event_type, schema_version, payload_json, occurred_at
+    ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM capacity_offers WHERE offer_id = ? AND tenant_id = ?
+      )`
+  ).bind(
+    event.eventId,
+    event.tenantId,
+    event.actorId,
+    event.causationId,
+    event.aggregateType,
+    event.aggregateId,
+    event.aggregateVersion,
+    event.type,
+    event.schemaVersion,
+    JSON.stringify(event.payload),
+    event.occurredAt,
+    offerId,
+    tenantId
+  );
 }
 
 function guardedReviewEventInsert(
@@ -1846,6 +2659,32 @@ function auditInsert(
     );
 }
 
+function guardedCapacityOfferAuditInsert(
+  db: D1Database,
+  identity: RequestIdentity,
+  offerId: string,
+  details: Record<string, unknown>,
+  occurredAt: string
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT INTO audit_events (
+      audit_id, tenant_id, actor_id, action, resource_type, resource_id, details_json, occurred_at
+    ) SELECT ?, ?, ?, 'offer.published', 'capacity-offer', ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1 FROM capacity_offers WHERE offer_id = ? AND tenant_id = ?
+      )`
+  ).bind(
+    `audit-${crypto.randomUUID()}`,
+    identity.tenantId,
+    identity.actorId,
+    offerId,
+    JSON.stringify(details),
+    occurredAt,
+    offerId,
+    identity.tenantId
+  );
+}
+
 function guardedInferenceLedgerInsert(
   db: D1Database,
   tenantId: string,
@@ -1956,12 +2795,37 @@ function validateAuthorizationInput(input: CreateAuthorizationRequest): void {
   assertDataClasses(input.dataClasses);
   assertLimits(input.limits);
   assertFutureTimestamp(input.validUntil, "validUntil");
+  validateGatewayBearerToken(input.gatewayBearerToken);
+}
+
+function validateGatewayBearerToken(value: unknown): asserts value is string {
   if (
-    typeof input.gatewayBearerToken !== "string" ||
-    !/^[A-Za-z0-9_-]{43,512}$/.test(input.gatewayBearerToken) ||
-    new Set(input.gatewayBearerToken).size < 16
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9_-]{43,512}$/.test(value) ||
+    new Set(value).size < 16
   ) {
     throw new ApiError("INVALID_REQUEST", "gatewayBearerToken 必须是至少 256 bit 的高熵 base64url 令牌。", 400);
+  }
+}
+
+function assertAuthorizationRevocationReason(
+  value: unknown
+): asserts value is RevokeAuthorizationRequest["reasonCode"] {
+  if (![
+    "supplier-requested",
+    "credential-compromised",
+    "provider-revoked",
+    "gateway-decommissioned"
+  ].includes(value as string)) {
+    throw new ApiError("INVALID_REQUEST", "授权撤销原因无效。", 400);
+  }
+}
+
+function assertGatewayCredentialRotationReason(
+  value: unknown
+): asserts value is RotateAuthorizationCredentialRequest["reasonCode"] {
+  if (!["scheduled", "credential-compromised", "gateway-reconfigured"].includes(value as string)) {
+    throw new ApiError("INVALID_REQUEST", "Gateway 凭据换发原因无效。", 400);
   }
 }
 
@@ -2051,12 +2915,23 @@ function assertPositiveIntegerString(value: unknown, label: string): asserts val
 }
 
 function assertFutureTimestamp(value: unknown, label: string): Date {
-  if (typeof value !== "string" || !value.endsWith("Z")) throw new ApiError("INVALID_REQUEST", `${label} 必须是 UTC 时间。`, 400);
-  const timestamp = new Date(value);
-  if (!isAuthorizationValidityAllowed(value, Date.now())) {
+  const normalized = normalizeUtcTimestamp(value, label);
+  const timestamp = new Date(normalized);
+  if (!isAuthorizationValidityAllowed(normalized, Date.now())) {
     throw new ApiError("INVALID_REQUEST", `${label} 必须晚于当前时间一分钟且不超过 90 天。`, 400);
   }
   return timestamp;
+}
+
+function normalizeUtcTimestamp(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.endsWith("Z")) {
+    throw new ApiError("INVALID_REQUEST", `${label} 必须是 UTC 时间。`, 400);
+  }
+  const timestamp = new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) {
+    throw new ApiError("INVALID_REQUEST", `${label} 必须是有效的 UTC 时间。`, 400);
+  }
+  return timestamp.toISOString();
 }
 
 function parseDataClasses(value: string): Array<"P0" | "P1"> {
@@ -2099,4 +2974,11 @@ function requiredEvidenceString(value: unknown, label: string, maximum: number):
 function requiredText(value: string | undefined, label: string): string {
   if (!value) throw new ApiError("INTERNAL_ERROR", `${label} 缺失。`, 500);
   return value;
+}
+
+function requiredPositiveInteger(value: number | undefined, label: string): number {
+  if (!Number.isSafeInteger(value) || (value ?? 0) < 1) {
+    throw new ApiError("INTERNAL_ERROR", `${label} 缺失或格式无效。`, 500);
+  }
+  return value!;
 }

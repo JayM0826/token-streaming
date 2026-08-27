@@ -105,7 +105,15 @@ test("machine maintenance route uses a separate constant-time bearer boundary", 
   assert.match(maintenance, /maintenance\.authentication/);
   assert.match(maintenance, /cleanupExpiredArtifactData\(now\)/);
   assert.match(maintenance, /assertRuntimeCryptographicConfiguration\(\)/);
-  assert.match(maintenance, /ensureCredentialKeyCanaries\(keyringInventory, now\)/);
+  assert.match(maintenance, /assertAppliedCredentialKeyringManifestState\(\)/);
+  assert.match(maintenance, /assertCredentialKeyCanaries\(keyringInventory\)/);
+  assert.doesNotMatch(
+    maintenance.slice(
+      maintenance.indexOf("export async function requireMaintenanceAuthorization"),
+      maintenance.indexOf("export async function runMarketplaceMaintenance")
+    ),
+    /createCredentialLookupDigest/
+  );
   assert.match(maintenance, /legacyCredentialContentReferences = await assertReferencedCredentialKeysAvailable\([\s\S]*?keyringInventory[\s\S]*?\)/);
   assert.match(maintenance, /legacyCredentialContentReferences,/);
   assert.match(maintenance, /rotateCredentialEncryptions/);
@@ -116,6 +124,87 @@ test("machine maintenance route uses a separate constant-time bearer boundary", 
   assert.match(maintenance, /a\.content_purged_at IS NULL/);
   assert.match(maintenance, /pendingArtifactTombstones/);
   assert.match(maintenance, /artifactTombstoneRetentionBreaches/);
+});
+
+test("cryptographic preflight is maintenance-authenticated and strictly read-only", async () => {
+  const route = await source("app/api/internal/cryptography/preflight/route.ts");
+  const preflight = await source("server/cryptographic-preflight-service.ts");
+
+  assert.match(route, /requireCryptographicPreflightAuthorization\(request\)/);
+  assert.match(route, /runCryptographicPreflight\(\)/);
+  assert.doesNotMatch(route, /requireIdentity\(\)/);
+  assert.match(preflight, /minimumReaderVersion: MARKETPLACE_CRYPTO_READER_VERSION/);
+  assert.match(preflight, /runtimeRetirementEligible/);
+  assert.match(preflight, /safeToDestroy: false/);
+  assert.match(preflight, /invalidPersistedReferences/);
+  assert.match(preflight, /CRYPTOGRAPHIC_PREFLIGHT_SCHEMA_CAPABILITIES_SQL/);
+  assert.match(preflight, /input\.schema\.keyringStates/);
+  assert.match(preflight, /input\.schema\.bootstrapEligibility/);
+  assert.match(preflight, /const canary = await inspectCanary/);
+  const readiness = preflight.slice(
+    preflight.indexOf("const readyForApply"),
+    preflight.indexOf("return {", preflight.indexOf("const readyForApply"))
+  );
+  assert.doesNotMatch(readiness, /baselineEligibility/);
+  assert.doesNotMatch(preflight, /ensureSchema\(/);
+  assert.doesNotMatch(preflight, /\b(?:INSERT|UPDATE|DELETE|REPLACE)\b/i);
+  const maintenance = await source("server/maintenance-service.ts");
+  const readOnlyAuth = maintenance.slice(
+    maintenance.indexOf("export async function requireCryptographicPreflightAuthorization"),
+    maintenance.indexOf("async function assertMaintenanceBearer")
+  );
+  assert.doesNotMatch(readOnlyAuth, /enforceScopeRateLimit|ensureSchema|getD1/);
+  assert.match(maintenance, /gongsuanyun\.maintenance-preflight\.v1/);
+});
+
+test("slot activation and canary registration use explicit monotonic lifecycle actions", async () => {
+  const applyRoute = await source("app/api/internal/cryptography/manifest/apply/route.ts");
+  const registerRoute = await source("app/api/internal/cryptography/keys/register/route.ts");
+  const baselineRoute = await source("app/api/internal/cryptography/keys/baseline/route.ts");
+  const lifecycle = await source("server/cryptographic-key-lifecycle-service.ts");
+  const security = await source("server/security.ts");
+
+  for (const route of [applyRoute, registerRoute, baselineRoute]) {
+    assert.match(route, /requireMaintenanceAuthorization\(request\)/);
+    assert.doesNotMatch(route, /requireIdentity\(\)/);
+  }
+  assert.match(lifecycle, /cryptographic_keyring_states\.generation < excluded\.generation/);
+  assert.doesNotMatch(
+    lifecycle,
+    /configurationState === "current"\) \{\s*return lifecycleResult/
+  );
+  assert.match(lifecycle, /readLifecycleEventByCommand\(input\.commandId\)/);
+  assert.match(lifecycle, /WHERE command_id = \?/);
+  assert.match(lifecycle, /domain\.baselineEligibility !== "eligible"/);
+  assert.match(lifecycle, /consumeBaselineEligibilitySql/);
+  assert.match(
+    lifecycle,
+    /INSERT INTO cryptographic_keyring_states[\s\S]*?WHERE NOT EXISTS \([\s\S]*?command_id = \?/
+  );
+  assert.match(
+    lifecycle,
+    /INSERT INTO cryptographic_key_canaries[\s\S]*?KEY_REGISTERED'[\s\S]*?command_id = \?/
+  );
+  assert.equal((lifecycle.match(/if \(!raced\) throw error;/g) ?? []).length, 3);
+  assert.match(
+    lifecycle,
+    /catch \(error\) \{[\s\S]*?readLifecycleEventByCommand\(input\.commandId\)[\s\S]*?assertMatchingEvent/
+  );
+  assert.match(lifecycle, /key\.state !== "staged"/);
+  assert.match(lifecycle, /key\.liveReferences !== 0/);
+  assert.match(lifecycle, /backupReference/);
+  assert.match(lifecycle, /event_type = 'KEY_REGISTERED'/);
+  assert.match(lifecycle, /gongsuanyun\.key-baseline\.v1/);
+  assert.match(lifecycle, /createRuntimeKeyCustodyVerifier/);
+  assert.match(lifecycle, /SELECT event_id, key_id, generation, event_type/);
+  assert.match(lifecycle, /event\.event_id !== eventId/);
+  assert.match(lifecycle, /isFreshLegacyConfiguration/);
+  assert.match(lifecycle, /isFreshManifestConfiguration/);
+  assert.match(lifecycle, /domain\.configurationState === "unapplied"/);
+  assert.match(lifecycle, /key\.liveReferences !== 0/);
+  assert.match(security, /assertPersistedKeyringManifestState/);
+  assert.match(security, /row\.generation !== keyring\.configurationGeneration/);
+  assert.match(security, /if \(row\) \{[\s\S]*?"CRYPTO_CONFIG_ROLLBACK"[\s\S]*?不能移除 manifest/);
 });
 
 test("artifact retention sweeps use small resumable transitions", async () => {
@@ -215,7 +304,7 @@ test("runtime schema bootstrap covers every additive D1 column migration and tol
 
   const runtimeStatements = [...runtimeSchema.matchAll(/sql: ("(?:[^"\\]|\\.)*")/g)]
     .map((match) => normalizeSql(JSON.parse(match[1])));
-  assert.equal(migrationStatements.length, 23);
+  assert.equal(migrationStatements.length, 30);
   assert.deepEqual(new Set(runtimeStatements), new Set(migrationStatements));
   assert.match(runtimeSchema, /if \(await columnExists\(db, migration\.table, migration\.column\)\) continue/);
   assert.match(runtimeSchema, /catch \(error\)[\s\S]*?if \(!await columnExists\(db, migration\.table, migration\.column\)\) throw error/);

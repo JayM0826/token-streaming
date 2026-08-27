@@ -47,6 +47,49 @@ test("atomic reservations prevent cross-workload overspend and enforce task quot
   assert.equal(available(db), 70n);
 });
 
+test("new reservations reject a stale authorization revision at the write boundary", async () => {
+  const db = await marketplaceDatabase();
+  seedCapacity(db, 100n);
+  db.prepare(
+    "UPDATE authorization_requests SET authorization_revision = 2 WHERE request_id = 'authorization-one'"
+  ).run();
+
+  assert.equal(reserveInference(db, "stale-inference", "stale-inference-idem", "10").changes, 0);
+  assert.equal(reserveArtifact(db, "stale-artifact", "stale-artifact-idem", "10", 3).changes, 0);
+  assert.equal(db.prepare(
+    "SELECT COUNT(*) AS count FROM inference_jobs WHERE job_id = 'stale-inference'"
+  ).get().count, 0);
+  assert.equal(db.prepare(
+    "SELECT COUNT(*) AS count FROM artifact_tasks WHERE task_id = 'stale-artifact'"
+  ).get().count, 0);
+});
+
+test("reservation joins refuse an authorization whose principal or provider no longer matches the offer", async () => {
+  const db = await marketplaceDatabase();
+  seedCapacity(db, 100n);
+  db.prepare(
+    "UPDATE authorization_requests SET provider_id = 'other-provider' WHERE request_id = 'authorization-one'"
+  ).run();
+
+  assert.equal(reserveInference(db, "provider-race", "provider-race-idem", "10").changes, 0);
+  assert.equal(reserveArtifact(db, "provider-race-task", "provider-race-task-idem", "10", 3).changes, 0);
+});
+
+test("reservation writes cannot bind a foreign supplier tenant or self-buy from the supplier", async () => {
+  const db = await marketplaceDatabase();
+  seedCapacity(db, 100n);
+
+  assert.equal(reserveInference(
+    db, "wrong-supplier", "wrong-supplier-idem", "10", "foreign-supplier-tenant"
+  ).changes, 0);
+  assert.equal(reserveArtifact(
+    db, "wrong-supplier-task", "wrong-supplier-task-idem", "10", 3, "foreign-supplier-tenant"
+  ).changes, 0);
+  assert.equal(reserveInference(
+    db, "self-buy", "self-buy-idem", "10", "supplier-tenant", "supplier-tenant"
+  ).changes, 0);
+});
+
 test("completion gates reject expired, cancelled, or unbacked settlements", async () => {
   const db = await marketplaceDatabase();
   seedCapacity(db, 100n);
@@ -343,25 +386,31 @@ test("settlement ledger effects are idempotent per job and effect type", async (
   assert.equal(statement.run("entry-three", "supplier-credit", now).changes, 1);
 });
 
-function reserveInference(db, jobId, idempotencyKey, amount) {
+function reserveInference(
+  db, jobId, idempotencyKey, amount,
+  supplierTenantId = "supplier-tenant", buyerTenantId = "buyer-tenant"
+) {
   return db.prepare(RESERVE_INFERENCE_JOB_SQL).run(
-    jobId, "buyer-tenant", "supplier-tenant", "offer-one", idempotencyKey, "model-one",
-    "P0", "strict", `digest-${jobId}`, 2, 100, amount, future, now,
-    "buyer-tenant", "buyer-tenant", "buyer-tenant", amount,
-    "offer-one", now, now, now,
+    jobId, buyerTenantId, supplierTenantId, "offer-one", "authorization-one", 1,
+    idempotencyKey, "model-one", "P0", "strict", `digest-${jobId}`, 2, 100, amount, future, now,
+    buyerTenantId, buyerTenantId, buyerTenantId, amount,
+    "offer-one", "authorization-one", 1, supplierTenantId, buyerTenantId, now, now, now,
     "offer-one", "offer-one", 2
   );
 }
 
-function reserveArtifact(db, taskId, idempotencyKey, amount, maximumActiveTasks) {
+function reserveArtifact(
+  db, taskId, idempotencyKey, amount, maximumActiveTasks,
+  supplierTenantId = "supplier-tenant", buyerTenantId = "buyer-tenant"
+) {
   return db.prepare(RESERVE_ARTIFACT_TASK_SQL).run(
-    taskId, "buyer-tenant", "supplier-tenant", "offer-one", "authorization-one",
+    taskId, buyerTenantId, supplierTenantId, "offer-one", "authorization-one", 1,
     "artifact-one", idempotencyKey, "model-one", "P0", "standard", `digest-${taskId}`,
     2, "cipher", "iv", 2, 100, 1_000, amount, now, now,
-    "artifact-one", "buyer-tenant", now,
-    "offer-one", now, now, now,
-    "buyer-tenant", maximumActiveTasks,
-    "buyer-tenant", "buyer-tenant", "buyer-tenant", amount
+    "artifact-one", buyerTenantId, now,
+    "offer-one", "authorization-one", 1, supplierTenantId, buyerTenantId, now, now, now,
+    buyerTenantId, maximumActiveTasks,
+    buyerTenantId, buyerTenantId, buyerTenantId, amount
   );
 }
 

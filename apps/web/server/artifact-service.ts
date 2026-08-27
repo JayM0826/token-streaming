@@ -87,6 +87,7 @@ interface ArtifactOfferRow {
   tenant_id: string;
   supplier_tenant_id: string;
   authorization_request_id: string;
+  authorization_revision: number;
   provider_id: string;
   model: string;
   price_micros_per_million_tokens: string;
@@ -100,6 +101,7 @@ export interface ArtifactTaskRow {
   supplier_tenant_id: string;
   offer_id: string;
   authorization_request_id: string;
+  authorization_revision: number;
   artifact_id: string;
   file_name?: string;
   idempotency_key: string;
@@ -493,7 +495,8 @@ export async function createArtifactTask(
   const now = new Date().toISOString();
   const classNeedle = `%\"${input.dataClass}\"%`;
   const offer = await db.prepare(
-    `SELECT o.*, s.tenant_id AS supplier_tenant_id, ar.gateway_token_digest
+    `SELECT o.*, s.tenant_id AS supplier_tenant_id, ar.gateway_token_digest,
+      ar.authorization_revision
      FROM capacity_offers o
      JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
      JOIN authorization_requests ar ON ar.request_id = o.authorization_request_id AND ar.status = 'approved'
@@ -506,11 +509,12 @@ export async function createArtifactTask(
      WHERE o.status = 'active' AND o.model = ? AND o.valid_from <= ? AND o.valid_until > ?
        AND o.data_classes_json LIKE ? AND o.max_output_tokens >= ?
        AND s.status = 'active' AND s.supply_enabled = 1 AND s.tenant_id <> ?
-       AND ar.gateway_token_digest IS NOT NULL
+       AND ar.valid_until > ? AND ar.tenant_id = o.tenant_id AND ar.supplier_id = o.supplier_id
+       AND ar.provider_id = o.provider_id AND ar.gateway_token_digest IS NOT NULL
      ORDER BY CAST(o.price_micros_per_million_tokens AS INTEGER) ASC, o.created_at ASC LIMIT 1`
   ).bind(
     now, artifact.size_bytes, `%"${model}"%`, `%"${artifact.media_type}"%`,
-    model, now, now, classNeedle, maxOutputTokens, identity.tenantId
+    model, now, now, classNeedle, maxOutputTokens, identity.tenantId, now
   ).first<ArtifactOfferRow>();
   if (!offer) throw new ApiError("ARTIFACT_TASK_UNAVAILABLE", "当前没有已启用文件任务能力的匹配供应节点。", 409, true);
   const reservedChargeMicros = estimateArtifactMaximumChargeMicros({
@@ -532,13 +536,16 @@ export async function createArtifactTask(
   const results = await db.batch([
     db.prepare(RESERVE_ARTIFACT_TASK_SQL).bind(
       taskId, identity.tenantId, offer.supplier_tenant_id, offer.offer_id,
-      offer.authorization_request_id, artifact.artifact_id, idempotencyKey, model,
+      offer.authorization_request_id, offer.authorization_revision,
+      artifact.artifact_id, idempotencyKey, model,
       input.dataClass, artifact.privacy_mode, instructionCommitment.digest, instructionCommitment.version,
       encryptedInstruction.ciphertext,
       encryptedInstruction.iv, encryptedInstruction.keyVersion, maxOutputTokens, maxTotalTokens,
       reservedChargeMicros, now, now,
       artifact.artifact_id, identity.tenantId, now,
-      offer.offer_id, now, now, now,
+      offer.offer_id, offer.authorization_request_id, offer.authorization_revision,
+      offer.supplier_tenant_id, identity.tenantId,
+      now, now, now,
       identity.tenantId, policy.maximumActiveArtifactTasksPerTenant,
       identity.tenantId, identity.tenantId, identity.tenantId, reservedChargeMicros
     ),
@@ -719,7 +726,9 @@ export async function cleanupExpiredArtifactData(
     db.prepare(
       `UPDATE artifact_tasks SET status = 'cancelled', lease_digest = NULL, lease_expires_at = NULL,
          execution_deadline_at = NULL,
-         error_code = 'USER_CANCELLED', completed_at = ?, updated_at = ?
+         error_code = CASE WHEN error_code = 'AUTHORIZATION_REVOKED_PENDING'
+           THEN 'AUTHORIZATION_REVOKED' ELSE 'USER_CANCELLED' END,
+         completed_at = ?, updated_at = ?
        WHERE cancellation_requested_at IS NOT NULL AND status IN ('claimed', 'running')
           AND (lease_expires_at <= ? OR execution_deadline_at IS NULL OR execution_deadline_at <= ?)`
     ).bind(now, now, now, now),

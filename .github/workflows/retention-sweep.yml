@@ -17,6 +17,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Verify cryptographic recovery boundary
+        env:
+          MARKETPLACE_MAINTENANCE_KEY: ${{ secrets.MARKETPLACE_MAINTENANCE_KEY }}
+        run: |
+          test -n "$MARKETPLACE_MAINTENANCE_KEY"
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          http_code="$(curl --silent --show-error \
+            --output "$response_file" --write-out '%{http_code}' \
+            --retry 3 --retry-all-errors --max-time 60 \
+            -X POST \
+            -H "Accept: application/json" \
+            -H "Authorization: Bearer $MARKETPLACE_MAINTENANCE_KEY" \
+            https://gongsuanyun-market.wenzaiyin.chatgpt.site/api/internal/cryptography/preflight)"
+          test "$http_code" = "200"
+          python3 - "$response_file" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if payload.get("ok") is not True or payload.get("ready") is not True:
+              raise SystemExit("cryptographic preflight did not confirm runtime readiness")
+          if payload.get("minimumReaderVersion") != 3:
+              raise SystemExit("unexpected minimum cryptographic reader version")
+          if payload.get("invalidPersistedReferences") != 0:
+              raise SystemExit("persisted cryptographic format/key-id references are invalid")
+          domains = payload.get("domains")
+          if not isinstance(domains, list) or len(domains) != 2:
+              raise SystemExit("cryptographic preflight domain inventory is incomplete")
+          for domain in domains:
+              if domain.get("unknownReferencedKeyIds") != []:
+                  raise SystemExit("a persisted row references an unavailable key id")
+              for key in domain.get("keys", []):
+                  if key.get("state") == "readable" and key.get("canary") != "valid":
+                      raise SystemExit("a readable key does not have a valid canary")
+                  if key.get("safeToDestroy") is not False:
+                      raise SystemExit("the application must never approve final key destruction")
+          print(f"cryptographic preflight completed at {payload.get('checkedAt', 'unknown')}")
+          PY
+
       - name: Purge expired marketplace content
         env:
           MARKETPLACE_MAINTENANCE_KEY: ${{ secrets.MARKETPLACE_MAINTENANCE_KEY }}

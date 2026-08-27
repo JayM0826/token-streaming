@@ -33,6 +33,7 @@ async function initializeSchema(): Promise<void> {
   const statements = SCHEMA_STATEMENTS.map((statement) => db.prepare(statement));
   await db.batch(statements);
   await ensureRuntimeColumns(db);
+  await ensureAuthorizationLifecycleStatusConstraint(db);
   await db.batch(POST_COLUMN_SCHEMA_STATEMENTS.map((statement) => db.prepare(statement)));
   await db.prepare("PRAGMA optimize").run();
 }
@@ -56,6 +57,42 @@ async function columnExists(db: D1Database, table: string, column: string): Prom
   return result.results.some((entry) => entry.name === column);
 }
 
+async function ensureAuthorizationLifecycleStatusConstraint(db: D1Database): Promise<void> {
+  const definition = await db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'authorization_requests'"
+  ).first<{ sql: string | null }>();
+  const sql = definition?.sql ?? "";
+  const hasStatusConstraint = /CHECK\s*\(\s*status\s+IN/i.test(sql);
+  if (!hasStatusConstraint || (sql.includes("'withdrawn'") && sql.includes("'revoked'"))) return;
+
+  await db.batch([
+    db.prepare("ALTER TABLE authorization_requests RENAME TO authorization_requests_lifecycle_legacy"),
+    db.prepare(AUTHORIZATION_REQUESTS_SCHEMA_SQL),
+    db.prepare(`INSERT INTO authorization_requests (
+      request_id, tenant_id, supplier_id, provider_id, source_type, metering_mode, evidence_ref,
+      model_pattern, region_code, data_classes_json, requests_per_minute, tokens_per_minute,
+      concurrency, max_output_tokens, valid_until, gateway_endpoint, encrypted_gateway_token,
+      gateway_token_iv, credential_key_id, gateway_token_digest, gateway_token_digest_version,
+      gateway_token_lookup_key_id, encryption_key_version, authorization_revision, status,
+      review_note, reviewed_by, review_command_id, reviewed_at, credential_rotated_at,
+      revoked_at, revocation_reason_code, created_at, updated_at
+    ) SELECT
+      request_id, tenant_id, supplier_id, provider_id, source_type, metering_mode, evidence_ref,
+      model_pattern, region_code, data_classes_json, requests_per_minute, tokens_per_minute,
+      concurrency, max_output_tokens, valid_until, gateway_endpoint, encrypted_gateway_token,
+      gateway_token_iv, credential_key_id, gateway_token_digest, gateway_token_digest_version,
+      gateway_token_lookup_key_id, encryption_key_version, authorization_revision, status,
+      review_note, reviewed_by, review_command_id, reviewed_at, credential_rotated_at,
+      revoked_at, revocation_reason_code, created_at, updated_at
+    FROM authorization_requests_lifecycle_legacy`),
+    db.prepare("DROP TABLE authorization_requests_lifecycle_legacy"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_authorization_requests_tenant_status ON authorization_requests (tenant_id, status)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_authorization_requests_status_created ON authorization_requests (status, created_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_authorization_requests_credential_status ON authorization_requests (gateway_token_digest_version, gateway_token_digest, status, valid_until)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_authorization_requests_lookup_status ON authorization_requests (gateway_token_digest_version, gateway_token_lookup_key_id, gateway_token_digest, status, valid_until)")
+  ]);
+}
+
 const RUNTIME_COLUMN_MIGRATIONS = [
   {
     table: "authorization_requests",
@@ -71,6 +108,26 @@ const RUNTIME_COLUMN_MIGRATIONS = [
     table: "authorization_requests",
     column: "gateway_token_lookup_key_id",
     sql: "ALTER TABLE `authorization_requests` ADD `gateway_token_lookup_key_id` text DEFAULT 'legacy-commitment-v2' NOT NULL"
+  },
+  {
+    table: "authorization_requests",
+    column: "authorization_revision",
+    sql: "ALTER TABLE `authorization_requests` ADD `authorization_revision` integer DEFAULT 1 NOT NULL"
+  },
+  {
+    table: "authorization_requests",
+    column: "credential_rotated_at",
+    sql: "ALTER TABLE `authorization_requests` ADD `credential_rotated_at` text"
+  },
+  {
+    table: "authorization_requests",
+    column: "revoked_at",
+    sql: "ALTER TABLE `authorization_requests` ADD `revoked_at` text"
+  },
+  {
+    table: "authorization_requests",
+    column: "revocation_reason_code",
+    sql: "ALTER TABLE `authorization_requests` ADD `revocation_reason_code` text"
   },
   {
     table: "artifact_tasks",
@@ -111,6 +168,16 @@ const RUNTIME_COLUMN_MIGRATIONS = [
     table: "inference_jobs",
     column: "content_purged_at",
     sql: "ALTER TABLE `inference_jobs` ADD `content_purged_at` text"
+  },
+  {
+    table: "inference_jobs",
+    column: "authorization_request_id",
+    sql: "ALTER TABLE `inference_jobs` ADD `authorization_request_id` text"
+  },
+  {
+    table: "inference_jobs",
+    column: "authorization_revision",
+    sql: "ALTER TABLE `inference_jobs` ADD `authorization_revision` integer"
   },
   {
     table: "artifact_task_evidence",
@@ -171,13 +238,79 @@ const RUNTIME_COLUMN_MIGRATIONS = [
     table: "artifact_tasks",
     column: "execution_deadline_at",
     sql: "ALTER TABLE `artifact_tasks` ADD `execution_deadline_at` text"
+  },
+  {
+    table: "artifact_tasks",
+    column: "authorization_revision",
+    sql: "ALTER TABLE `artifact_tasks` ADD `authorization_revision` integer DEFAULT 1 NOT NULL"
   }
 ] as const;
 
 const POST_COLUMN_SCHEMA_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS idx_authorization_requests_credential_status ON authorization_requests (gateway_token_digest_version, gateway_token_digest, status, valid_until)",
-  "CREATE INDEX IF NOT EXISTS idx_authorization_requests_lookup_status ON authorization_requests (gateway_token_digest_version, gateway_token_lookup_key_id, gateway_token_digest, status, valid_until)"
+  "CREATE INDEX IF NOT EXISTS idx_authorization_requests_lookup_status ON authorization_requests (gateway_token_digest_version, gateway_token_lookup_key_id, gateway_token_digest, status, valid_until)",
+  "CREATE INDEX IF NOT EXISTS idx_inference_jobs_authorization_status ON inference_jobs (authorization_request_id, status)",
+  "CREATE INDEX IF NOT EXISTS idx_artifact_tasks_authorization_status ON artifact_tasks (authorization_request_id, status)"
 ] as const;
+
+const AUTHORIZATION_REQUESTS_SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS authorization_requests (
+    request_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    supplier_id TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    metering_mode TEXT NOT NULL,
+    evidence_ref TEXT NOT NULL,
+    model_pattern TEXT NOT NULL,
+    region_code TEXT NOT NULL,
+    data_classes_json TEXT NOT NULL,
+    requests_per_minute INTEGER NOT NULL,
+    tokens_per_minute INTEGER NOT NULL,
+    concurrency INTEGER NOT NULL,
+    max_output_tokens INTEGER NOT NULL,
+    valid_until TEXT NOT NULL,
+    gateway_endpoint TEXT NOT NULL,
+    encrypted_gateway_token TEXT NOT NULL,
+    gateway_token_iv TEXT NOT NULL,
+    credential_key_id TEXT NOT NULL DEFAULT 'legacy-credential-v2',
+    gateway_token_digest TEXT,
+    gateway_token_digest_version INTEGER NOT NULL DEFAULT 1,
+    gateway_token_lookup_key_id TEXT NOT NULL DEFAULT 'legacy-commitment-v2',
+    encryption_key_version INTEGER NOT NULL DEFAULT 1,
+    authorization_revision INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'withdrawn', 'revoked')),
+    review_note TEXT,
+    reviewed_by TEXT,
+    review_command_id TEXT,
+    reviewed_at TEXT,
+    credential_rotated_at TEXT,
+    revoked_at TEXT,
+    revocation_reason_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`;
+
+const FRESH_CRYPTOGRAPHIC_BOOTSTRAP_HISTORY_PREDICATE = [
+  "users",
+  "suppliers",
+  "authorization_requests",
+  "capacity_offers",
+  "marketplace_events",
+  "inference_jobs",
+  "usage_records",
+  "service_evidence",
+  "ledger_entries",
+  "audit_events",
+  "idempotency_keys",
+  "artifacts",
+  "artifact_chunks",
+  "artifact_object_deletions",
+  "supplier_artifact_workers",
+  "artifact_tasks",
+  "artifact_task_checkpoints",
+  "artifact_task_evidence",
+  "agent_request_nonces"
+].map((table) => `NOT EXISTS (SELECT 1 FROM ${table})`).join(" AND ");
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS users (
@@ -204,38 +337,7 @@ const SCHEMA_STATEMENTS = [
   )`,
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_suppliers_tenant_id ON suppliers (tenant_id)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_suppliers_user_id ON suppliers (user_id)",
-  `CREATE TABLE IF NOT EXISTS authorization_requests (
-    request_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    supplier_id TEXT NOT NULL,
-    provider_id TEXT NOT NULL,
-    source_type TEXT NOT NULL,
-    metering_mode TEXT NOT NULL,
-    evidence_ref TEXT NOT NULL,
-    model_pattern TEXT NOT NULL,
-    region_code TEXT NOT NULL,
-    data_classes_json TEXT NOT NULL,
-    requests_per_minute INTEGER NOT NULL,
-    tokens_per_minute INTEGER NOT NULL,
-    concurrency INTEGER NOT NULL,
-    max_output_tokens INTEGER NOT NULL,
-    valid_until TEXT NOT NULL,
-    gateway_endpoint TEXT NOT NULL,
-    encrypted_gateway_token TEXT NOT NULL,
-    gateway_token_iv TEXT NOT NULL,
-    credential_key_id TEXT NOT NULL DEFAULT 'legacy-credential-v2',
-    gateway_token_digest TEXT,
-    gateway_token_digest_version INTEGER NOT NULL DEFAULT 1,
-    gateway_token_lookup_key_id TEXT NOT NULL DEFAULT 'legacy-commitment-v2',
-    encryption_key_version INTEGER NOT NULL DEFAULT 1,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
-    review_note TEXT,
-    reviewed_by TEXT,
-    review_command_id TEXT,
-    reviewed_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  )`,
+  AUTHORIZATION_REQUESTS_SCHEMA_SQL,
   "CREATE INDEX IF NOT EXISTS idx_authorization_requests_tenant_status ON authorization_requests (tenant_id, status)",
   "CREATE INDEX IF NOT EXISTS idx_authorization_requests_status_created ON authorization_requests (status, created_at)",
   `CREATE TABLE IF NOT EXISTS capacity_offers (
@@ -284,6 +386,8 @@ const SCHEMA_STATEMENTS = [
     buyer_tenant_id TEXT NOT NULL,
     supplier_tenant_id TEXT NOT NULL,
     offer_id TEXT NOT NULL,
+    authorization_request_id TEXT,
+    authorization_revision INTEGER,
     idempotency_key TEXT NOT NULL,
     model TEXT NOT NULL,
     data_class TEXT NOT NULL CHECK (data_class IN ('P0', 'P1')),
@@ -405,6 +509,44 @@ const SCHEMA_STATEMENTS = [
     created_at TEXT NOT NULL
   )`,
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_cryptographic_key_canaries_domain_key ON cryptographic_key_canaries (domain, key_id)",
+  `CREATE TABLE IF NOT EXISTS cryptographic_key_lifecycle_events (
+    event_id TEXT PRIMARY KEY,
+    domain TEXT NOT NULL CHECK (domain IN ('credential-encryption', 'credential-lookup')),
+    key_id TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('MANIFEST_APPLIED', 'KEY_REGISTERED')),
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    manifest_hash TEXT NOT NULL CHECK (
+      length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    backup_reference TEXT,
+    command_id TEXT NOT NULL,
+    occurred_at TEXT NOT NULL
+  )`,
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_cryptographic_key_lifecycle_command_global ON cryptographic_key_lifecycle_events (command_id)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_cryptographic_key_registered_once ON cryptographic_key_lifecycle_events (domain, key_id, event_type) WHERE event_type = 'KEY_REGISTERED'",
+  "CREATE INDEX IF NOT EXISTS idx_cryptographic_key_lifecycle_time ON cryptographic_key_lifecycle_events (domain, occurred_at)",
+  `CREATE TABLE IF NOT EXISTS cryptographic_keyring_states (
+    domain TEXT PRIMARY KEY CHECK (domain IN ('credential-encryption', 'credential-lookup')),
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    manifest_hash TEXT NOT NULL CHECK (
+      length(manifest_hash) = 64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    active_key_id TEXT NOT NULL,
+    minimum_reader_version INTEGER NOT NULL DEFAULT 3 CHECK (minimum_reader_version >= 3),
+    applied_at TEXT NOT NULL,
+    command_id TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS cryptographic_key_bootstrap_eligibility (
+    domain TEXT PRIMARY KEY CHECK (domain IN ('credential-encryption', 'credential-lookup')),
+    provenance TEXT NOT NULL CHECK (provenance = 'migration-empty-history-v1'),
+    eligible_at TEXT NOT NULL,
+    consumed_at TEXT,
+    consumed_command_id TEXT,
+    CHECK (
+      (consumed_at IS NULL AND consumed_command_id IS NULL) OR
+      (consumed_at IS NOT NULL AND consumed_command_id IS NOT NULL)
+    )
+  )`,
   `CREATE TABLE IF NOT EXISTS artifacts (
     artifact_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -469,6 +611,7 @@ const SCHEMA_STATEMENTS = [
     supplier_tenant_id TEXT NOT NULL,
     offer_id TEXT NOT NULL,
     authorization_request_id TEXT NOT NULL,
+    authorization_revision INTEGER NOT NULL DEFAULT 1,
     artifact_id TEXT NOT NULL,
     idempotency_key TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -554,5 +697,18 @@ const SCHEMA_STATEMENTS = [
     expires_at TEXT NOT NULL
   )`,
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_request_nonces_unique ON agent_request_nonces (credential_digest, nonce)",
-  "CREATE INDEX IF NOT EXISTS idx_agent_request_nonces_expires ON agent_request_nonces (expires_at)"
+  "CREATE INDEX IF NOT EXISTS idx_agent_request_nonces_expires ON agent_request_nonces (expires_at)",
+  `INSERT OR IGNORE INTO cryptographic_key_bootstrap_eligibility (
+     domain, provenance, eligible_at, consumed_at, consumed_command_id
+   )
+   SELECT domain, 'migration-empty-history-v1',
+     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), NULL, NULL
+   FROM (
+     SELECT 'credential-encryption' AS domain
+     UNION ALL SELECT 'credential-lookup'
+   )
+   WHERE ${FRESH_CRYPTOGRAPHIC_BOOTSTRAP_HISTORY_PREDICATE}
+     AND NOT EXISTS (SELECT 1 FROM cryptographic_key_canaries)
+     AND NOT EXISTS (SELECT 1 FROM cryptographic_key_lifecycle_events)
+     AND NOT EXISTS (SELECT 1 FROM cryptographic_keyring_states)`
 ] as const;

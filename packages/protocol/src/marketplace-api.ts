@@ -23,6 +23,14 @@ export type MarketplaceApiErrorCode =
   | "SUPPLIER_NOT_ACTIVE"
   | "AUTHORIZATION_REQUIRED"
   | "AUTHORIZATION_PENDING"
+  | "AUTHORIZATION_STATE_CONFLICT"
+  | "GATEWAY_CREDENTIAL_CONFLICT"
+  | "CRYPTO_CONFIG_INVALID"
+  | "CRYPTO_CONFIG_ROLLBACK"
+  | "CRYPTO_CANARY_MISSING"
+  | "CRYPTO_CANARY_MISMATCH"
+  | "CRYPTO_REFERENCED_KEY_MISSING"
+  | "CRYPTO_KEYRING_CAPACITY_EXHAUSTED"
   | "INSUFFICIENT_BALANCE"
   | "CAPACITY_UNAVAILABLE"
   | "GATEWAY_HOST_NOT_ALLOWED"
@@ -69,7 +77,13 @@ export interface SupplierProfileView {
   updatedAt: string;
 }
 
-export type AuthorizationReviewStatus = "pending" | "approved" | "rejected";
+export type AuthorizationReviewStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "withdrawn"
+  | "revoked"
+  | "expired";
 
 export interface AuthorizationRequestView {
   requestId: string;
@@ -86,6 +100,10 @@ export interface AuthorizationRequestView {
   validUntil: string;
   status: AuthorizationReviewStatus;
   reviewNote: string | null;
+  authorizationRevision: number;
+  credentialRotatedAt: string | null;
+  revokedAt: string | null;
+  revocationReasonCode: AuthorizationRevocationReason | null;
   createdAt: string;
   reviewedAt: string | null;
 }
@@ -201,6 +219,28 @@ export interface ReviewAuthorizationRequest {
   commandId: string;
   decision: "approve" | "reject";
   reviewNote?: string;
+}
+
+export type AuthorizationRevocationReason =
+  | "supplier-requested"
+  | "credential-compromised"
+  | "provider-revoked"
+  | "gateway-decommissioned";
+
+export interface RevokeAuthorizationRequest {
+  commandId: string;
+  reasonCode: AuthorizationRevocationReason;
+}
+
+export type GatewayCredentialRotationReason =
+  | "scheduled"
+  | "credential-compromised"
+  | "gateway-reconfigured";
+
+export interface RotateAuthorizationCredentialRequest {
+  commandId: string;
+  reasonCode: GatewayCredentialRotationReason;
+  gatewayBearerToken: string;
 }
 
 export interface CreateCapacityOfferRequest {

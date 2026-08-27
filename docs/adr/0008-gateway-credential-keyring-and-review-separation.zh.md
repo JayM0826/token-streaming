@@ -54,5 +54,11 @@ maintenance 在任何留存变更前扫描仍有密文/摘要的授权行，确�
 - Gateway credential 加密与 Agent lookup 已具备有界、可观察、失败关闭的轮换路径；格式版本不再被当作 key id。
 - 单个 Gateway token 的 Agent 有效授权投影上限为 100。查询读取第 101 行时明确失败；经签名验证的批量 lookup CAS 会迁移该 token 所有可读旧命名空间（包括响应上限之外和非活动行），避免旧 key 被永久钉住或静默少返回权限。
 - `MARKETPLACE_CONTENT_KEY`、`MARKETPLACE_ARTIFACT_KEY` 和通用 `MARKETPLACE_COMMITMENT_KEY` 仍是单值生命周期。它们必须保持稳定并备份，直到各内容/分块/证据表增加独立 key id；artifact chunk keyring 和长期 commitment verification 是下一阶段。
-- 平台仍缺少供应方自助撤销单条授权和换 token 的完整状态机。泄露的客户网关 token 当前应先关闭供给并由管理员拒绝/失效相关授权；正式商业运营前应增加按 authorization 的 revoke、凭据清除和报价失效原子流程。
+- 单条授权撤回、撤销和 Gateway token 替换已由 [ADR 0010](0010-authorization-lifecycle-and-gateway-token-replacement.zh.md) 补充；本 ADR 的 keyring 重包仍只处理平台加密/lookup key 生命周期，不等于供应节点 bearer token 换发。
 - KMS/HSM、每租户或每 artifact envelope key、双人审批及合规级恢复演练仍是商业发布依赖。
+
+## 后续恢复设计
+
+[ADR 0009](0009-gateway-key-custody-slot-manifest-and-recovery.zh.md) 已把整包 write-only JSON secret 演进为兼容旧来源的独立 secret slot 加非秘密 staged/readable manifest，并以显式 canary 登记、单调 generation/hash 状态和只读 preflight 取代恢复场景中的 trust-on-first-use。未配置 manifest 的环境仍保持本 ADR 的整包 keyring 行为。
+
+实时 D1 引用归零只证明 key 可以从运行时退役。删除 Sites secret 和销毁最终 KMS/HSM 恢复副本是两个更晚且独立审批的动作，必须考虑所有 D1/R2、事故及法务保留备份。具体步骤见 [Gateway 密钥灾备、再次轮换与回滚 Runbook](../runbooks/gateway-key-disaster-recovery-and-rotation.zh.md)。

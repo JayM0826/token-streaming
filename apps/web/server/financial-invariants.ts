@@ -7,11 +7,12 @@
 
 export const RESERVE_INFERENCE_JOB_SQL = `
   INSERT OR IGNORE INTO inference_jobs (
-    job_id, buyer_tenant_id, supplier_tenant_id, offer_id, idempotency_key, model,
+    job_id, buyer_tenant_id, supplier_tenant_id, offer_id, authorization_request_id,
+    authorization_revision, idempotency_key, model,
     data_class, privacy_mode, prompt_digest, digest_version, max_output_tokens,
     reserved_charge_micros, reservation_expires_at, status, created_at
   )
-  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?
   WHERE (
     COALESCE((SELECT SUM(CASE WHEN direction = 'credit' THEN CAST(amount_micros AS INTEGER)
       ELSE -CAST(amount_micros AS INTEGER) END) FROM ledger_entries WHERE tenant_id = ?), 0)
@@ -25,7 +26,14 @@ export const RESERVE_INFERENCE_JOB_SQL = `
     JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
     JOIN authorization_requests ar
       ON ar.request_id = o.authorization_request_id AND ar.status = 'approved'
-    WHERE o.offer_id = ? AND o.status = 'active' AND o.valid_from <= ? AND o.valid_until > ?
+    WHERE o.offer_id = ? AND o.authorization_request_id = ?
+      AND o.tenant_id = s.tenant_id AND o.supplier_id = s.supplier_id
+      AND ar.tenant_id = o.tenant_id AND ar.supplier_id = o.supplier_id
+      AND ar.provider_id = o.provider_id AND ar.authorization_revision = ?
+      AND ar.encrypted_gateway_token <> '' AND ar.gateway_token_iv <> ''
+      AND ar.gateway_token_digest IS NOT NULL
+      AND o.tenant_id = ? AND o.tenant_id <> ?
+      AND o.status = 'active' AND o.valid_from <= ? AND o.valid_until > ?
       AND ar.valid_until > ? AND s.status = 'active' AND s.supply_enabled = 1
   )
   AND (
@@ -38,11 +46,11 @@ export const RESERVE_INFERENCE_JOB_SQL = `
 export const RESERVE_ARTIFACT_TASK_SQL = `
   INSERT OR IGNORE INTO artifact_tasks (
     task_id, buyer_tenant_id, supplier_tenant_id, offer_id, authorization_request_id,
-    artifact_id, idempotency_key, model, data_class, privacy_mode, instruction_digest,
+    authorization_revision, artifact_id, idempotency_key, model, data_class, privacy_mode, instruction_digest,
     digest_version, instruction_ciphertext, instruction_iv, content_key_version,
     max_output_tokens, max_total_tokens, reserved_charge_micros, status, created_at, updated_at
   )
-  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?
   WHERE EXISTS (
     SELECT 1 FROM artifacts
     WHERE artifact_id = ? AND tenant_id = ? AND status = 'ready'
@@ -53,7 +61,14 @@ export const RESERVE_ARTIFACT_TASK_SQL = `
     JOIN suppliers s ON s.supplier_id = o.supplier_id AND s.tenant_id = o.tenant_id
     JOIN authorization_requests ar
       ON ar.request_id = o.authorization_request_id AND ar.status = 'approved'
-    WHERE o.offer_id = ? AND o.status = 'active' AND o.valid_from <= ? AND o.valid_until > ?
+    WHERE o.offer_id = ? AND o.authorization_request_id = ?
+      AND o.tenant_id = s.tenant_id AND o.supplier_id = s.supplier_id
+      AND ar.tenant_id = o.tenant_id AND ar.supplier_id = o.supplier_id
+      AND ar.provider_id = o.provider_id AND ar.authorization_revision = ?
+      AND ar.encrypted_gateway_token <> '' AND ar.gateway_token_iv <> ''
+      AND ar.gateway_token_digest IS NOT NULL
+      AND o.tenant_id = ? AND o.tenant_id <> ?
+      AND o.status = 'active' AND o.valid_from <= ? AND o.valid_until > ?
       AND ar.valid_until > ? AND s.status = 'active' AND s.supply_enabled = 1
   )
   AND (SELECT COUNT(*) FROM artifact_tasks

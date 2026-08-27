@@ -18,7 +18,7 @@
 7. 过期清理由平台流量与 bearer-authenticated 维护端点共同驱动。GitHub Actions 每 10 分钟请求一次维护端点并重试；端点同时释放陈旧推理预留、清除过期输出和凭据、删除过期 nonce/限流/worker 心跳，并执行有界 artifact sweep。它先验证全部 256 位生产密钥分域、Gateway credential/lookup keyring、持久 canary 及仍被 D1 引用的 key id，再进行清理和最多四条 credential CAS 重包；除了 rotation backlog 和 R2 删除墓碑超过 24 小时重试期限，维护结果还报告 `unclaimedExpiredArtifacts` 与 `pendingArtifactTombstones`，分别监控过期后 24 小时仍未取得清除所有权、以及开始清除后 24 小时仍未完成 generation tombstone 的 breach。任一 retention breach 都使计划监控失败。计划任务可能延迟，因此该频率是运行目标而不是硬删除 SLA。
 8. `artifact_tasks.content_purged_at` 可能只表示 24 小时输出已到期清空；task 完整清除必须同时证明该标记存在、指令和输出字段为空、关联 artifact 已 `deleted` 且有清除时间、并且不存在任何 generation。接口与 UI 不能因该复用标记而隐藏仍处于 48 小时输入窗口的主动清除入口。完整状态之后的任意 artifact/artifact-task 显式重试都会以稳定 action/resource audit ID 幂等补齐缺失完成审计，并按 tenant/action/resource 抑制重复事件。
 9. Marketplace 事件持久化真实 `schema_version`；供应凭据查找使用独立 HMAC 承诺，校验有效期并兼容懒升级旧摘要；网关调用禁止 HTTP redirect，防止允许的公网地址跳转到私网。ADR 0008 进一步把 Gateway lookup 从长期 commitment 生命周期拆为有界 keyring，并让 nonce claim 覆盖所有可读摘要命名空间。
-10. D1 的权威升级链为 0000–0011，共 21 张表。0008 增加独立 R2 删除墓碑，0009 增加每任务/结算 effect 唯一索引，0010 增加绝对执行期限并把无法安全继承该约束的旧活动 artifact task 终止为 `EXECUTION_MIGRATED`；0011 增加 Gateway credential/lookup key id、查询索引和持久 cryptographic canary。真实临时 D1 测试必须覆盖完整迁移链和旧行升级，不能只检查 SQL 文本。
+10. D1 的权威升级链现为 0000–0015，共 24 张表。0008 增加独立 R2 删除墓碑，0009 增加每任务/结算 effect 唯一索引，0010 增加绝对执行期限并把无法安全继承该约束的旧活动 artifact task 终止为 `EXECUTION_MIGRATED`；0011 增加 Gateway credential/lookup key id、查询索引和持久 cryptographic canary；0012 增加 authorization revision、撤销/换发元数据和两类任务的授权快照；0013 增加密码配置单调状态与追加生命周期事件；0014 为按授权清理推理/文件任务增加索引；0015 增加一次性 fresh-bootstrap provenance 并把 lifecycle command 升级为跨域/跨操作全局唯一。真实临时 D1 测试必须覆盖完整迁移链和旧行升级，不能只检查 SQL 文本；runtime bootstrap 还必须事务升级旧三状态 authorization CHECK。
 
 ## 后果
 
