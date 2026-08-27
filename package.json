@@ -5,12 +5,18 @@
   "description": "CLI-first agentic coding runtime with agent-native repository metadata.",
   "type": "module",
   "packageManager": "pnpm@9.15.0",
+  "pnpm": {
+    "overrides": {
+      "postcss": "8.5.23",
+      "sharp": "0.35.3"
+    }
+  },
   "scripts": {
     "build": "tsc -b tsconfig.json --force",
     "clean": "tsc -b tsconfig.json --clean",
     "typecheck": "tsc -b tsconfig.json --force",
     "test": "tsc -b tsconfig.json --force && node --test \"packages/**/*.test.mjs\" \"apps/**/*.test.mjs\"",
-    "lint": "pnpm -r lint",
+    "lint": "corepack pnpm@9.15.0 -r lint",
     "package:check": "node scripts/check-package-readiness.mjs",
     "package:install-check": "node scripts/check-packed-install.mjs",
     "acceptance:check": "node scripts/check-acceptance.mjs",
@@ -18,8 +24,11 @@
     "smoke:anthropic": "node scripts/smoke-anthropic.mjs",
     "smoke:gemini": "node scripts/smoke-gemini.mjs",
     "smoke:codex": "node scripts/smoke-codex.mjs",
+    "launch:check": "corepack pnpm@9.15.0 test && corepack pnpm@9.15.0 lint && corepack pnpm@9.15.0 package:check && corepack pnpm@9.15.0 package:install-check && corepack pnpm@9.15.0 --filter @token-streaming/web build && corepack pnpm@9.15.0 audit --prod --audit-level=high",
     "dev": "pnpm --filter @token-streaming/cli dev",
-    "cli": "pnpm --filter @token-streaming/cli start"
+    "cli": "pnpm --filter @token-streaming/cli start",
+    "supplier-node": "pnpm --filter @token-streaming/supplier-node start",
+    "supplier-agent": "pnpm --filter @token-streaming/supplier-agent start"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

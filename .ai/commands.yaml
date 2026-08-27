@@ -5,6 +5,8 @@ build:
 package:
   - npx pnpm@9.15.0 package:check
   - npx pnpm@9.15.0 package:install-check
+launch:
+  - corepack pnpm@9.15.0 launch:check
 acceptance:
   - npx pnpm@9.15.0 acceptance:check -- --json
   - npx pnpm@9.15.0 acceptance:check -- --quick --json
@@ -15,6 +17,19 @@ cli:
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- --dry-run --json "summarize this repo"
 version:
   - node apps/cli/dist/index.js --version
+supplier_agent:
+  - npx pnpm@9.15.0 --filter @token-streaming/supplier-agent start
+  - node apps/supplier-agent/dist/index.js doctor
+supplier_artifacts:
+  - npx pnpm@9.15.0 --filter @token-streaming/supplier-node test
+  - npx pnpm@9.15.0 --filter @token-streaming/supplier-agent test
+  - npx pnpm@9.15.0 --dir apps/web typecheck
+  - npx pnpm@9.15.0 --dir apps/web build
+privacy_security:
+  - node --test "apps/web/test/**/*.test.mjs"
+  - npx pnpm@9.15.0 --filter @token-streaming/marketplace-domain test
+  - npx pnpm@9.15.0 --filter @token-streaming/supplier-agent test
+  - npx pnpm@9.15.0 --dir apps/web typecheck
 commands:
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- commands list
   - npx pnpm@9.15.0 --filter @token-streaming/cli start -- commands list --json

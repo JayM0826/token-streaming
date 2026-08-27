@@ -1,0 +1,5 @@
+# Local Codex is the engineering agent for this repository.
+# This does not select or constrain models offered by the marketplace runtime.
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+service_tier = "fast"

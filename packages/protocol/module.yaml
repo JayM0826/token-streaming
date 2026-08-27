@@ -1,5 +1,5 @@
 name: protocol
-description: Shared TypeScript contracts for sessions, events, manifests, strategies, tools, models, and checkpoints.
+description: Shared TypeScript contracts for coding sessions and the provider-neutral compute-capacity marketplace.
 owners:
   - core-runtime
 public_api:
@@ -12,9 +12,20 @@ used_by:
   - storage
   - providers
   - cli
+  - marketplace-domain
+  - web
 test_commands:
   - npx pnpm@9.15.0 --filter @token-streaming/protocol test
 rules:
   - Keep this package dependency-light.
   - Do not import runtime packages from protocol.
+  - Keep individual and organization suppliers in one versioned contract with kind-specific verification policy.
+  - Represent provider authorization scope explicitly, including data classes and capacity ceilings.
+  - Never add passwords, cookies, API keys, reusable tokens, or raw identity documents to marketplace contracts.
+  - Keep browser-facing marketplace views free of tenant identifiers and encrypted credential fields.
+  - Keep supplier-gateway contracts provider-neutral and version breaking wire changes explicitly.
+  - Keep signature canonicalization deterministic and free of runtime dependencies.
+  - Bind every billable response to canonical execution evidence covering Provider, requested and served model, request ID, input/output digests, usage, and completion time.
+  - Keep large-file bytes out of JSON contracts; publish only bounded artifact manifests, chunk descriptors, leases, progress, and signed execution evidence.
+  - Make supplier plaintext visibility, privacy mode, retention summary, and buyer-owned purge operations explicit in versioned contracts.
 

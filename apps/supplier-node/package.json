@@ -1,0 +1,33 @@
+{
+  "name": "@token-streaming/supplier-node",
+  "version": "0.3.0",
+  "description": "Hardened provider-neutral inference gateway for GongSuanYun suppliers.",
+  "type": "module",
+  "private": false,
+  "bin": {
+    "gongsuanyun-supplier-node": "dist/index.js"
+  },
+  "exports": {
+    "./runtime": {
+      "types": "./dist/public.d.ts",
+      "import": "./dist/public.js"
+    }
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node --test \"test/**/*.test.mjs\"",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js serve"
+  },
+  "dependencies": {
+    "@token-streaming/protocol": "workspace:*"
+  }
+}

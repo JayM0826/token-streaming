@@ -1,0 +1,29 @@
+name: marketplace-domain
+description: Headless domain for supplier onboarding, capacity offers, privacy intent, settlement, attestation, and execution-evidence verification.
+owners:
+  - marketplace-core
+public_api:
+  - packages/marketplace-domain/src/index.ts
+depends_on:
+  - protocol
+used_by:
+  - web
+  - future-control-plane
+  - future-gateway
+  - future-tui
+test_commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/marketplace-domain test
+rules:
+  - Treat individual and organization suppliers as first-class peers.
+  - Keep identity-kind differences in explicit verification policy, not scattered branches.
+  - Persist only opaque evidence references; reject raw credentials and reusable login state.
+  - Make supplier and offer changes through append-only versioned events.
+  - Require current KYC/KYB, active authorization, and verifiable metering before activation or offer publication.
+  - Keep offers within authorized model, region, data-class, validity, and capacity ceilings.
+  - Enforce event and causation uniqueness at persistence boundaries; retries return prior committed results.
+  - Fail closed for P2/P3 until dedicated compliance policy is represented and accepted.
+  - Keep provider-specific wire formats and authentication outside this package.
+  - Require signed live node attestation to fit the requested Provider, model, data-class, and capacity scope before activation.
+  - Reject execution evidence unless Provider, exact model, request, content digests, usage, and completion window match the purchased service.
+  - Bind large-file settlement to the immutable artifact manifest, served exact model, aggregate usage, output digest, and signed execution evidence.
+  - Require explicit supplier-processing acknowledgement and calculate standard/strict retention through one provider-neutral privacy policy.

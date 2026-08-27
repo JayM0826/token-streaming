@@ -10,7 +10,19 @@ const packages = [
     bin: ["token-streaming", "ai"],
     library: false
   },
-  ...["protocol", "providers", "ai-manifest", "tools", "storage", "core"].map((name) => ({
+  {
+    name: "@token-streaming/supplier-node",
+    directory: "apps/supplier-node",
+    bin: ["gongsuanyun-supplier-node"],
+    library: false
+  },
+  {
+    name: "@token-streaming/supplier-agent",
+    directory: "apps/supplier-agent",
+    bin: ["gongsuanyun-agent"],
+    library: false
+  },
+  ...["protocol", "marketplace-domain", "providers", "ai-manifest", "tools", "storage", "core"].map((name) => ({
     name: `@token-streaming/${name}`,
     directory: `packages/${name}`,
     bin: [],

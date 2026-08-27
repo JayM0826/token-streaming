@@ -1,0 +1,37 @@
+name: web
+description: Sites-hosted marketplace UI and production composition root for authenticated users, D1 persistence, and secure server APIs.
+owners:
+  - marketplace-web
+public_api:
+  - apps/web/app/page.tsx
+  - apps/web/app/api/v1
+depends_on:
+  - protocol
+  - marketplace-domain
+used_by:
+  - browser-clients
+test_commands:
+  - corepack pnpm@9.15.0 --dir apps/web typecheck
+  - node --test "apps/web/test/**/*.test.mjs"
+  - corepack pnpm@9.15.0 --dir apps/web build
+  - corepack pnpm@9.15.0 --dir apps/web lint
+rules:
+  - Sign every supplier-node call with the encrypted gateway token, timestamp, nonce, job ID, and exact request-body digest.
+  - Require a signed live supplier-node attestation before approving authorization; reject Provider, model, data-class, or capacity mismatches.
+  - Verify canonical per-job execution evidence before settlement and atomically persist the evidence with balanced ledger postings.
+  - Keep the consumer PWA service worker away from authenticated pages, sign-in routes, and API responses.
+  - Keep browser components free of pricing, authorization, settlement, and routing decisions.
+  - Route server-side supplier and offer invariants through marketplace-domain and explicit runtime policy objects.
+  - Never expose provider credentials or raw verification evidence to browser bundles.
+  - Derive tenant and actor identity only from platform-authenticated server headers.
+  - Keep D1 statements tenant-scoped and append financial corrections instead of rewriting ledger history.
+  - Reject unapproved capacity, P2/P3 data, private-network gateways, and non-allowlisted production gateway hosts.
+  - Keep file bytes out of JSON and D1; store only independently encrypted, tenant-bound chunks in R2 and remove expired bytes with a bounded sweep.
+  - Schedule artifact work only to a recently heartbeating Agent whose signed identity, authorization, Provider, exact model, media type, and file-size limit all match.
+  - Reserve the full artifact token ceiling, release it only at terminal state, and write verified evidence, usage, and balanced ledger entries in one guarded D1 batch.
+  - Keep customer job, artifact, filename, instruction, and replayable output views buyer-only; suppliers receive only their leased assignment and aggregate business metrics.
+  - Require explicit supplier/upstream plaintext-processing acknowledgement and default the UI to strict retention without claiming end-to-end execution secrecy.
+  - Separate credential, replayable-content, artifact, and digest-commitment keys; bind ciphertext and commitments to purpose, tenant, and resource identity.
+  - Purge active content and raw manifests without deleting or rewriting append-only ledger, usage, audit, or evidence history.
+  - Apply durable tenant/credential rate limits, same-origin mutation checks, and no-store defensive response headers.
+  - Exercise schema upgrades against a real temporary D1 database with legacy rows, and keep production bootstrap additive, re-entrant, and safe under Worker-isolate races; source-pattern assertions alone are not migration evidence.

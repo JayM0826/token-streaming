@@ -1,0 +1,46 @@
+services:
+  supplier-node:
+    build:
+      context: ../..
+      dockerfile: apps/supplier-node/Dockerfile
+    env_file:
+      - .env
+    environment:
+      SUPPLIER_NODE_BIND_HOST: 0.0.0.0
+      SUPPLIER_NODE_PORT: 8789
+    expose:
+      - "8789"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8789/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    environment:
+      SUPPLIER_NODE_PUBLIC_HOST: ${SUPPLIER_NODE_PUBLIC_HOST:?set SUPPLIER_NODE_PUBLIC_HOST in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      supplier-node:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,24 @@
+name: supplier-agent
+description: Cross-platform loopback GUI and TUI host over the hardened supplier-node runtime.
+owners:
+  - marketplace-supplier-runtime
+public_api:
+  - apps/supplier-agent/src/index.ts
+depends_on:
+  - supplier-node
+used_by:
+  - individual-suppliers
+  - organization-suppliers
+test_commands:
+  - corepack pnpm@9.15.0 --filter @token-streaming/supplier-agent test
+rules:
+  - Keep supplier-node as the headless kernel; the local GUI and TUI contain no inference or billing logic.
+  - Bind the management server and inference gateway to loopback by default.
+  - Encrypt upstream and gateway credentials at rest with a user passphrase; never log, persist in plaintext, or place them in URLs.
+  - Keep the high-entropy per-process management token in an HttpOnly SameSite=Strict loopback Cookie, never in URLs or frontend JavaScript, and require same-origin checks for local state changes.
+  - Reauthenticate every gateway-token reveal, erase the displayed value after 60 seconds, and throttle repeated or parallel passphrase failures.
+  - Never expose prompts, outputs, upstream credentials, or gateway credentials through status endpoints.
+  - Claim large-file tasks only through outbound signed control calls; keep original bytes out of checkpoints and ordinary work directories.
+  - Encrypt resumable checkpoints at rest, bind them to task identity, and delete them after terminal completion or a non-retryable failure.
+  - Propagate the accepted privacy mode through artifact-worker.v2 and delete cancelled-task checkpoints without retry.
+  - Treat public tunnel or reverse-proxy setup as an explicit deployment boundary; never open router ports automatically.

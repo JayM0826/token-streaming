@@ -14,7 +14,21 @@ The first implementation focuses on one real orchestration strategy: `default`.
 
 See [docs/implementation-plan.md](docs/implementation-plan.md) for the full plan, [docs/codex-build-brief.zh.md](docs/codex-build-brief.zh.md) for the Chinese product/engineering brief, [docs/provider-configuration.zh.md](docs/provider-configuration.zh.md) for commercial API setup, [docs/v1-completion-audit.zh.md](docs/v1-completion-audit.zh.md) for the current completion decision, and [docs/v1-acceptance-matrix.md](docs/v1-acceptance-matrix.md) for requirement-by-requirement verification evidence.
 
+For the proposed authorized-capacity marketplace, start with the [commercial-model redesign and validation roadmap](docs/business-model-redesign.zh.md), then see [docs/compute-sharing-platform-design.zh.md](docs/compute-sharing-platform-design.zh.md), [docs/pricing-and-settlement.zh.md](docs/pricing-and-settlement.zh.md), and [docs/compute-sharing-decisions.zh.md](docs/compute-sharing-decisions.zh.md). Token Streaming supplies the engineering conventions and scaffold; local Codex supplies the development agent. Marketplace inference remains provider-neutral and separate from the developer's Codex session.
+
+The first marketplace implementation slice lives in [`packages/marketplace-domain`](packages/marketplace-domain): individual and organization suppliers share one event-sourced onboarding, provider-authorization, activation, and capacity-offer model. Personal `subscription-plan` capacity is represented explicitly in the domain, but the commercial recommendation is to keep it disabled by default unless a Provider supplies written resale/managed-service authorization, a formal connector, and verifiable metering. Every offer is bounded by current verification, model, region, data class, time window, and authorized capacity; P2/P3 remain fail-closed in this slice.
+
+The closed-beta marketplace lives in [`apps/web`](apps/web). It uses platform sign-in, tenant-scoped D1 persistence, administrator authorization review, durable capacity offers, an encrypted authorized-gateway adapter, idempotent inference jobs, append-only usage/ledger records, and explicit standard/strict privacy modes. Prompt bodies are not persisted; replayable content, credentials, files, and keyed digest commitments have separate secrets and record-bound cryptographic contexts. Content views and purge operations are buyer-only, while the supplier dashboard receives aggregate business metrics. Browser code never receives provider credentials or chooses tenant identity; customer inference remains separate from the engineering Codex session. Promotional beta balances are durable test ledger entries but are not cash, and payment/KYC evidence/payout providers remain external requirements for commercial launch.
+
+The deployable supplier runtime lives in [`apps/supplier-node`](apps/supplier-node). Individuals and organizations can run the same signed `gongsuanyun.gateway.v3` HTTPS node behind a public TLS proxy. The node keeps upstream credentials local, permits only exact configured models/data classes/provider hosts, enforces request signatures, nonce replay protection, idempotency, body/response bounds, and RPM/TPM/concurrency limits, and never executes local Codex, tools, shell commands, or buyer file access. Public readiness exposes no inventory; approval requires a signed one-time challenge whose Provider, exact models, P0/P1 scope, and capacity must contain the requested authorization. Every successful inference also carries a node-signed execution evidence record binding the purchased Provider/model, actual upstream response model, input/output digests, usage, and provider request ID. The control plane writes that evidence and the balanced settlement atomically; any mismatch fails without billing.
+
+The cross-platform supplier client lives in [`apps/supplier-agent`](apps/supplier-agent). It wraps the same headless node kernel with a loopback-only responsive GUI and safe CLI diagnostics for Windows, macOS, and Linux. First-run setup creates an encrypted AES-256-GCM credential vault derived from a user passphrase, starts and drains the local node, and shows metadata-only task health. Version 0.3 keeps its management session in an HttpOnly loopback Cookie, reauthenticates and rate-limits every gateway-token reveal, and speaks privacy-aware `artifact-worker.v2` for encrypted, resumable text-file tasks up to 256 MiB. A stable public HTTPS reverse proxy or named outbound tunnel remains required for real-time short requests; the outbound file worker does not add an inbound port, and the Agent never changes router or firewall settings automatically.
+
+Shared inference is not execution-party encryption: the matched supplier node and its upstream Provider process plaintext. Strict mode minimizes names and retention and enables immediate buyer purge, but customers who require the supplier to be unable to inspect memory need a customer-controlled node or a future remotely attested confidential-computing tier. See [`docs/adr/0006-privacy-minimization-and-verifiable-purge.zh.md`](docs/adr/0006-privacy-minimization-and-verifiable-purge.zh.md).
+
 ## Development
+
+AI-assisted development in this repository uses the project-scoped [`.codex/config.toml`](.codex/config.toml): GPT-5.6 Sol, `xhigh`, and Codex Fast mode. The boundary and coding rules are recorded in [`AGENTS.md`](AGENTS.md); these development settings are not customer-runtime defaults.
 
 ```bash
 pnpm install
@@ -23,14 +37,17 @@ pnpm build
 pnpm test
 pnpm package:check
 pnpm package:install-check
+pnpm launch:check
 pnpm acceptance:check
 pnpm cli -- "summarize this repo"
+pnpm supplier-agent
 node apps/cli/dist/index.js --version
 ```
 
 `pnpm test` compiles all workspace packages and then runs the Node.js behavior tests in `packages/**/*.test.mjs` and `apps/**/*.test.mjs` against the compiled `dist` output.
 `pnpm package:check` verifies release readiness for the CLI and workspace packages: module READMEs, package metadata, dist entrypoints, type declarations, package file allowlists, Node engine constraints, and CLI bin shebangs.
-`pnpm package:install-check` packs all seven workspace packages, installs the tarballs in an isolated offline consumer, verifies the CLI bin shim, and smoke-tests both the installed CLI and the public headless core API.
+`pnpm package:install-check` packs all publishable workspace packages, installs the tarballs in an isolated offline consumer, verifies the CLI bin shim, and smoke-tests both the installed CLI and the public headless core API.
+`pnpm launch:check` runs the complete offline public-beta release gate: behavior tests, pinned-version lint, package checks, isolated install checks, the Web production build, and a high-severity production dependency audit.
 `pnpm acceptance:check` runs the offline gates, including a deterministic end-to-end stub run, and performs its own live provider probe when an OpenAI, Anthropic, or Gemini API key is present. Without a key, it exits incomplete with a machine-readable `missing-api-key` status.
 
 ## Headless Core API

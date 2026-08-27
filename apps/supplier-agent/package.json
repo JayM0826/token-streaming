@@ -1,0 +1,28 @@
+{
+  "name": "@token-streaming/supplier-agent",
+  "version": "0.3.0",
+  "description": "Cross-platform local control client for GongSuanYun suppliers.",
+  "type": "module",
+  "private": false,
+  "bin": {
+    "gongsuanyun-agent": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.json && node --test \"test/**/*.test.mjs\"",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js start",
+    "package:windows-portable": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows-portable.ps1"
+  },
+  "dependencies": {
+    "@token-streaming/supplier-node": "workspace:*"
+  }
+}

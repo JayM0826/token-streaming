@@ -7,12 +7,15 @@ import path from "node:path";
 const repoRoot = path.resolve(".");
 const packageEntries = [
   ["@token-streaming/protocol", "packages/protocol"],
+  ["@token-streaming/marketplace-domain", "packages/marketplace-domain"],
   ["@token-streaming/providers", "packages/providers"],
   ["@token-streaming/ai-manifest", "packages/ai-manifest"],
   ["@token-streaming/tools", "packages/tools"],
   ["@token-streaming/storage", "packages/storage"],
   ["@token-streaming/core", "packages/core"],
-  ["@token-streaming/cli", "apps/cli"]
+  ["@token-streaming/cli", "apps/cli"],
+  ["@token-streaming/supplier-node", "apps/supplier-node"],
+  ["@token-streaming/supplier-agent", "apps/supplier-agent"]
 ];
 const tempRoot = await mkdtemp(path.join(tmpdir(), "token-streaming-pack-check-"));
 
@@ -65,6 +68,46 @@ try {
     throw new Error(`Unexpected packaged CLI version output: ${version}`);
   }
 
+  const supplierNodeBinPath = path.join(
+    consumerRoot,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "gongsuanyun-supplier-node.cmd" : "gongsuanyun-supplier-node"
+  );
+  await access(supplierNodeBinPath);
+  const supplierNodeEntrypoint = path.join(
+    consumerRoot,
+    "node_modules",
+    "@token-streaming",
+    "supplier-node",
+    "dist",
+    "index.js"
+  );
+  const supplierNodeVersion = run([process.execPath, supplierNodeEntrypoint, "--version"], consumerRoot).stdout.trim();
+  if (supplierNodeVersion !== `gongsuanyun-supplier-node ${expectedVersions.get("@token-streaming/supplier-node")}`) {
+    throw new Error(`Unexpected packaged supplier-node version output: ${supplierNodeVersion}`);
+  }
+
+  const supplierAgentBinPath = path.join(
+    consumerRoot,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "gongsuanyun-agent.cmd" : "gongsuanyun-agent"
+  );
+  await access(supplierAgentBinPath);
+  const supplierAgentEntrypoint = path.join(
+    consumerRoot,
+    "node_modules",
+    "@token-streaming",
+    "supplier-agent",
+    "dist",
+    "index.js"
+  );
+  const supplierAgentVersion = run([process.execPath, supplierAgentEntrypoint, "--version"], consumerRoot).stdout.trim();
+  if (supplierAgentVersion !== `gongsuanyun-agent ${expectedVersions.get("@token-streaming/supplier-agent")}`) {
+    throw new Error(`Unexpected packaged supplier-agent version output: ${supplierAgentVersion}`);
+  }
+
   const smoke = run([process.execPath, cliEntrypoint, "--provider", "stub", "--dry-run", "--json", "packaged CLI smoke"], consumerRoot);
   const result = parseJson(smoke.stdout, "packaged CLI smoke output");
   if (result.kind !== "run" || result.modelCalls?.[0]?.provider !== "stub") {
@@ -96,7 +139,32 @@ try {
     throw new Error("Packaged headless core smoke did not expose the expected planning and tool contracts.");
   }
 
-  console.log(`Packed install check passed for ${packageEntries.length} packages, the CLI, and the headless core.`);
+  const marketplaceSmoke = run(
+    [
+      process.execPath,
+      "--input-type=module",
+      "--eval",
+      [
+        'import { registerSupplier } from "@token-streaming/marketplace-domain";',
+        "const event = registerSupplier(",
+        '  { supplierId: "supplier_packaged", kind: "individual", legalName: "Packaged Supplier", displayName: "Packaged", countryCode: "US", taxResidenceCountryCode: "US" },',
+        '  { tenantId: "tenant_packaged", actorId: "actor_packaged", commandId: "command_packaged", eventId: "event_packaged", occurredAt: "2026-08-24T00:00:00.000Z" }',
+        ");",
+        "console.log(JSON.stringify({ type: event.type, kind: event.payload.kind, version: event.aggregateVersion }));"
+      ].join("\n")
+    ],
+    consumerRoot
+  );
+  const marketplaceResult = parseJson(marketplaceSmoke.stdout, "packaged marketplace-domain smoke output");
+  if (
+    marketplaceResult.type !== "supplier.registered" ||
+    marketplaceResult.kind !== "individual" ||
+    marketplaceResult.version !== 1
+  ) {
+    throw new Error("Packaged marketplace domain did not expose the expected individual-supplier contract.");
+  }
+
+  console.log(`Packed install check passed for ${packageEntries.length} packages, the CLI, supplier node, supplier agent, headless core, and marketplace domain.`);
 } finally {
   await rm(tempRoot, { recursive: true, force: true });
 }

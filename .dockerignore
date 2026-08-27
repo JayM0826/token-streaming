@@ -1,0 +1,9 @@
+.git
+.codex
+**/.env
+**/node_modules
+**/dist
+**/.next
+**/.wrangler
+**/outputs
+**/*.tsbuildinfo

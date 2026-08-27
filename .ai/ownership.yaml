@@ -1,8 +1,12 @@
 default_owner: agent-platform
 owned_paths:
   - apps/cli/**: cli-host
+  - apps/web/**: marketplace-web
+  - apps/supplier-node/**: marketplace-supplier-runtime
+  - apps/supplier-agent/**: marketplace-supplier-runtime
   - packages/core/**: runtime-core
   - packages/protocol/**: runtime-contracts
+  - packages/marketplace-domain/**: marketplace-core
   - packages/ai-manifest/**: agent-native-repo
   - packages/tools/**: tool-runtime
   - packages/storage/**: local-storage
@@ -11,6 +15,10 @@ owned_paths:
   - docs/**: product-architecture
 review_required:
   - protocol contract changes
+  - supplier onboarding, authorization, or capacity-offer invariant changes
   - permission or approval policy changes
   - checkpoint or rollback behavior changes
   - provider routing and telemetry changes
+  - supplier gateway authentication, replay, capacity, or upstream-host policy changes
+  - artifact encryption, retention, lease, checkpoint, capability heartbeat, evidence, or reservation changes
+  - privacy visibility, acknowledgement, tenant isolation, key separation, digest commitment, purge, or management-session changes

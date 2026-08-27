@@ -1,0 +1,14 @@
+declare namespace Cloudflare {
+  interface Env {
+    DB: D1Database;
+    ARTIFACTS: R2Bucket;
+    MARKETPLACE_ARTIFACT_KEY?: string;
+    MARKETPLACE_CREDENTIAL_KEY?: string;
+    MARKETPLACE_CONTENT_KEY?: string;
+    MARKETPLACE_COMMITMENT_KEY?: string;
+    MARKETPLACE_ADMIN_USER_IDS?: string;
+    MARKETPLACE_GATEWAY_HOST_ALLOWLIST?: string;
+    MARKETPLACE_PLATFORM_FEE_BPS?: string;
+    MARKETPLACE_WELCOME_CREDIT_MICROS?: string;
+  }
+}

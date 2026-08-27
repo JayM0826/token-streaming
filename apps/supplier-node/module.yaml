@@ -1,0 +1,28 @@
+name: supplier-node
+description: Hardened provider-neutral HTTPS inference gateway for individual and organization suppliers.
+owners:
+  - marketplace-supplier-runtime
+public_api:
+  - apps/supplier-node/src/runtime.ts
+  - apps/supplier-node/src/provider-adapter.ts
+  - apps/supplier-node/src/public.ts
+depends_on:
+  - protocol
+used_by:
+  - web
+  - supplier-agent
+test_commands:
+  - npx pnpm@9.15.0 --filter @token-streaming/supplier-node test
+rules:
+  - Never route customer prompts through local Codex or any developer session.
+  - Never log prompts, outputs, bearer credentials, upstream credentials, or authorization headers.
+  - Accept only the signed versioned supplier-gateway protocol and exact configured models and data classes.
+  - Expose only minimal public readiness; require signed one-time challenges for Provider, model, data-class, and capacity attestation.
+  - Keep upstream authentication and native request, response, usage, and error fields inside provider adapters.
+  - Reject arbitrary URLs, redirects, tools, shell execution, file access, and unconfigured provider hosts.
+  - Bind to loopback by default and place public deployments behind a terminating HTTPS reverse proxy.
+  - Keep request replay state and idempotent response replay bounded and in memory.
+  - Require the upstream response model to match the requested exact model and sign canonical per-job execution evidence before returning a billable response.
+  - Treat artifact bytes as untrusted, non-executable data; verify ordered chunk and whole-content digests before signing aggregate evidence.
+  - Enforce monotonic resumable checkpoints and a caller-approved full-task token ceiling across map and reduce calls.
+  - Accept only artifact-worker.v2 assignments with an explicit standard/strict privacy mode and fail cancelled leases non-retryably.
